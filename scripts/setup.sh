@@ -80,18 +80,18 @@ else
 fi
 
 printf 'Soniox API key\n'
-if keychain_key_present; then
+if [ -n "${SONIOX_API_KEY:-}" ]; then
+  security add-generic-password -U -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" -w "$SONIOX_API_KEY" >/dev/null
+  printf '  updated Keychain item from SONIOX_API_KEY\n'
+elif keychain_key_present; then
   printf '  Keychain item already present (service %s)\n' "$KEYCHAIN_SERVICE"
 else
-  key="${SONIOX_API_KEY:-}"
-  if [ -z "$key" ]; then
-    if [ ! -t 0 ]; then
-      printf '  SONIOX_API_KEY is not set and stdin is not a terminal\n' >&2
-      exit 1
-    fi
-    read -rsp "  Enter Soniox API key (input hidden): " key
-    printf '\n'
+  if [ ! -t 0 ]; then
+    printf '  SONIOX_API_KEY is not set and stdin is not a terminal\n' >&2
+    exit 1
   fi
+  read -rsp "  Enter Soniox API key (input hidden): " key
+  printf '\n'
   if [ -z "$key" ]; then
     printf '  empty key; aborting\n' >&2
     exit 1

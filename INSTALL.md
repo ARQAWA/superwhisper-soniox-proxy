@@ -40,7 +40,11 @@ export SONIOX_API_KEY='...'
 curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh | bash
 ```
 
-The key is never printed and is not written to the repository.
+The key is never printed and is not written to the repository. To rotate the key later, run:
+
+```bash
+SONIOX_API_KEY='new-key' bash ~/.local/share/superwhisper-soniox-proxy/scripts/setup.sh
+```
 
 ## Requirements
 
