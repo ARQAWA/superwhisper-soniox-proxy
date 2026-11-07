@@ -119,7 +119,7 @@ command -v networksetup >/dev/null 2>&1 || die "macOS networksetup tool is requi
 
 # When the installer itself is piped from curl, stdin is the script. Reopen the
 # terminal so setup can prompt for the Soniox key and macOS can show auth dialogs.
-if [ ! -t 0 ] && [ -r /dev/tty ]; then
+if [ -z "${SONIOX_API_KEY:-}" ] && [ ! -t 0 ] && [ -r /dev/tty ]; then
   exec </dev/tty
 fi
 

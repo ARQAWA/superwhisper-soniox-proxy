@@ -18,8 +18,11 @@ security_timeout() {
   fi
   if [ -n "$timeout_bin" ]; then
     "$timeout_bin" 8 security "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm 8; exec @ARGV' security "$@"
   else
-    security "$@"
+    printf 'skipping interactive security command (no timeout tool): security %s\n' "$*" >&2
+    return 1
   fi
 }
 

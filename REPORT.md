@@ -120,7 +120,7 @@ Criterion 12 is limited by Soniox async processing latency, not by the proxy. Ba
 - **SuperWhisper coupling**: the realtime detection depends on the app sending `model=nova-2`/`nova-3` and on the mode JSON format. A future app update may require re-running recon.
 - **Certificate lifetime**: the currently installed CA expires 2026-12-07 (30 days from creation). `scripts/gen-certs.sh` now defaults to 365-day CA / 397-day leaf for future runs. Renew and re-trust before expiry.
 - **System keychain**: the CA is also present in the System keychain from the initial manual trust. Teardown removes the login-keychain trust automatically and prints the `sudo` command for the System keychain when it cannot remove it non-interactively. Current app trust was verified through `URLSession`/`security verify-cert` even when explicit trust settings were empty, because the root is present in the login/System keychain.
-- **LaunchAgent**: provided but not the default. Background Keychain access can depend on the login session; `nohup` is the tested mode.
+- **LaunchAgent**: the GitHub installer uses it by default and it was verified on the development Mac (batch and realtime both work through the agent, which reads the key from Keychain). `nohup` remains a fallback for environments where background Keychain access is restricted.
 
 ## Teardown
 

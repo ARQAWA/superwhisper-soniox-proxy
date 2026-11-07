@@ -83,7 +83,7 @@ bash scripts/health.sh
 bash scripts/install-launchd.sh
 ```
 
-The agent runs `/opt/homebrew/bin/node dist/src/index.js` from this directory, writes logs to `logs/`, and does **not** receive `SONIOX_API_KEY` in its environment; it reads Keychain. If Keychain access is blocked for a background agent, use the default `nohup` mode.
+The GitHub installer uses a **LaunchAgent by default**; it falls back to `nohup` if the agent cannot start. A local `scripts/setup.sh` run uses `nohup` unless you pass `--launchd`. The agent runs `/opt/homebrew/bin/node dist/src/index.js` from this directory, writes logs to `logs/`, and does **not** receive `SONIOX_API_KEY` in its environment; it reads Keychain. If Keychain access is blocked for a background agent, use `bash scripts/setup.sh` (nohup mode).
 
 ## Verification
 
