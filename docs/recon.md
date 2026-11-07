@@ -113,7 +113,7 @@ Client frames observed:
 - Binary frames of raw `linear16` PCM, 16 kHz, mono. The app sent 342-byte chunks (about 10.7 ms of audio).
 - `{"type":"CloseStream"}` text frame at the end. No `Finalize` or `KeepAlive` frames were observed in the captured sessions.
 
-Server messages captured from real Deepgram pass-through (`logs/wss-server-schema.json`, schema-only):
+Server messages captured from real Deepgram pass-through (`fixtures/wss-server-schema.json`, schema-only):
 
 - `Results` with `type`, `channel_index`, `duration`, `start`, `is_final`, `speech_final`, `channel`, `metadata`, `from_finalize`.
 - An initial empty `Results` with `is_final=true`.
@@ -161,14 +161,14 @@ DRY_RUN=true CAPTURE_TEMPLATE=true LOG_LEVEL=debug node dist/src/index.js
 # 4. inspect schema-only evidence
 jq '.' fixtures/recon-capture.json
 jq '.' fixtures/superwhisper-response.template.json
-jq '.' logs/wss-server-schema.json
+jq '.' fixtures/wss-server-schema.json
 ```
 
 ## Privacy notes
 
 - Recon records contain no audio bytes, no transcript strings, no `Authorization`/cookie headers, and no API keys.
 - The response template is zeroed (`sanitizeForTemplate`) before it is written.
-- `logs/wss-server-schema.json` stores message types, flags, lengths, and word counts, not text.
+- `fixtures/wss-server-schema.json` stores message types, flags, lengths, and word counts, not text.
 - Logs redact `keyterm`, `keywords`, `prompt`, `context`, tokens, and unknown query parameters via `redactQuery()`.
 
 ## Limitations

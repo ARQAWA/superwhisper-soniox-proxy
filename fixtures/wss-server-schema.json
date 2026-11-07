@@ -1,0 +1,124 @@
+{
+  "records": [
+    {
+      "captured_at": "2026-11-07T07:03:00.995Z",
+      "model": "nova-2",
+      "keys": [
+        "type",
+        "channel_index",
+        "duration",
+        "start",
+        "is_final",
+        "speech_final",
+        "channel",
+        "metadata",
+        "from_finalize"
+      ],
+      "type": "Results",
+      "is_final": true,
+      "speech_final": true,
+      "duration": 0.51,
+      "start": 0,
+      "transcript_length": 0,
+      "words_count": 0,
+      "alternatives_count": 1,
+      "has_channel": true
+    },
+    {
+      "captured_at": "2026-11-07T07:03:01.659Z",
+      "model": "nova-2",
+      "keys": [
+        "type",
+        "channel_index",
+        "duration",
+        "start",
+        "is_final",
+        "speech_final",
+        "channel",
+        "metadata",
+        "from_finalize"
+      ],
+      "type": "Results",
+      "is_final": false,
+      "speech_final": false,
+      "duration": 1.007625,
+      "start": 0.51,
+      "transcript_length": 4,
+      "words_count": 1,
+      "alternatives_count": 1,
+      "has_channel": true
+    },
+    {
+      "captured_at": "2026-11-07T07:03:02.521Z",
+      "model": "nova-2",
+      "keys": [
+        "type",
+        "channel_index",
+        "duration",
+        "start",
+        "is_final",
+        "speech_final",
+        "channel",
+        "metadata",
+        "from_finalize"
+      ],
+      "type": "Results",
+      "is_final": false,
+      "speech_final": false,
+      "duration": 2.01225,
+      "start": 0.51,
+      "transcript_length": 17,
+      "words_count": 4,
+      "alternatives_count": 1,
+      "has_channel": true
+    },
+    {
+      "captured_at": "2026-11-07T07:03:03.233Z",
+      "model": "nova-2",
+      "keys": [
+        "type",
+        "channel_index",
+        "duration",
+        "start",
+        "is_final",
+        "speech_final",
+        "channel",
+        "metadata",
+        "from_finalize"
+      ],
+      "type": "Results",
+      "is_final": false,
+      "speech_final": false,
+      "duration": 3.016875,
+      "start": 0.51,
+      "transcript_length": 15,
+      "words_count": 4,
+      "alternatives_count": 1,
+      "has_channel": true
+    },
+    {
+      "captured_at": "2026-11-07T07:03:04.655Z",
+      "model": "nova-2",
+      "keys": [
+        "type",
+        "channel_index",
+        "duration",
+        "start",
+        "is_final",
+        "speech_final",
+        "channel",
+        "metadata",
+        "from_finalize"
+      ],
+      "type": "Results",
+      "is_final": false,
+      "speech_final": false,
+      "duration": 4.737562,
+      "start": 0.51,
+      "transcript_length": 29,
+      "words_count": 8,
+      "alternatives_count": 1,
+      "has_channel": true
+    }
+  ]
+}

@@ -55,7 +55,7 @@ No app file was modified. The mode JSON and macOS proxy settings are outside the
 ### Batch
 
 - `scripts/smoke-target.sh`: HTTP 200, 85 transcript characters, 11 words, 5.303 s audio, confidence 0.996.
-- 20 sequential dictation runs (`logs/bench20b.json`):
+- 20 sequential dictation runs (`fixtures/bench20b.json`):
   - success: **20/20**
   - p50: **2817.5 ms**
   - p95: **4133.1 ms**

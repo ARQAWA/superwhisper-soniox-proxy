@@ -1,0 +1,41 @@
+[
+{"rowid":6977,"datetime":"2026-11-07 06:22:13.000","modelKey":"sw-deepgram-nova-3","processingTime":3282,"rawWordCount":11,"fromFile":1,"iteration":1,"wall_seconds":4,"outcome":"ok"}
+,
+{"rowid":6978,"datetime":"2026-11-07 06:22:18.000","modelKey":"sw-deepgram-nova-3","processingTime":2758,"rawWordCount":11,"fromFile":1,"iteration":2,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6979,"datetime":"2026-11-07 06:22:22.000","modelKey":"sw-deepgram-nova-3","processingTime":2831,"rawWordCount":11,"fromFile":1,"iteration":3,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6980,"datetime":"2026-11-07 06:22:26.000","modelKey":"sw-deepgram-nova-3","processingTime":2807,"rawWordCount":11,"fromFile":1,"iteration":4,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6981,"datetime":"2026-11-07 06:22:30.000","modelKey":"sw-deepgram-nova-3","processingTime":4191,"rawWordCount":11,"fromFile":1,"iteration":5,"wall_seconds":5,"outcome":"ok"}
+,
+{"rowid":6982,"datetime":"2026-11-07 06:22:35.000","modelKey":"sw-deepgram-nova-3","processingTime":2684,"rawWordCount":11,"fromFile":1,"iteration":6,"wall_seconds":2,"outcome":"ok"}
+,
+{"rowid":6983,"datetime":"2026-11-07 06:22:38.000","modelKey":"sw-deepgram-nova-3","processingTime":2722,"rawWordCount":11,"fromFile":1,"iteration":7,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6984,"datetime":"2026-11-07 06:22:42.000","modelKey":"sw-deepgram-nova-3","processingTime":2760,"rawWordCount":11,"fromFile":1,"iteration":8,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6985,"datetime":"2026-11-07 06:22:46.000","modelKey":"sw-deepgram-nova-3","processingTime":2682,"rawWordCount":11,"fromFile":1,"iteration":9,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6986,"datetime":"2026-11-07 06:22:50.000","modelKey":"sw-deepgram-nova-3","processingTime":2785,"rawWordCount":11,"fromFile":1,"iteration":10,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6987,"datetime":"2026-11-07 06:22:54.000","modelKey":"sw-deepgram-nova-3","processingTime":2761,"rawWordCount":11,"fromFile":1,"iteration":11,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6988,"datetime":"2026-11-07 06:22:58.000","modelKey":"sw-deepgram-nova-3","processingTime":2863,"rawWordCount":11,"fromFile":1,"iteration":12,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6989,"datetime":"2026-11-07 06:23:02.000","modelKey":"sw-deepgram-nova-3","processingTime":2816,"rawWordCount":11,"fromFile":1,"iteration":13,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6990,"datetime":"2026-11-07 06:23:06.000","modelKey":"sw-deepgram-nova-3","processingTime":4130,"rawWordCount":11,"fromFile":1,"iteration":14,"wall_seconds":4,"outcome":"ok"}
+,
+{"rowid":6991,"datetime":"2026-11-07 06:23:11.000","modelKey":"sw-deepgram-nova-3","processingTime":2925,"rawWordCount":11,"fromFile":1,"iteration":15,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6992,"datetime":"2026-11-07 06:23:15.000","modelKey":"sw-deepgram-nova-3","processingTime":3930,"rawWordCount":11,"fromFile":1,"iteration":16,"wall_seconds":4,"outcome":"ok"}
+,
+{"rowid":6993,"datetime":"2026-11-07 06:23:20.000","modelKey":"sw-deepgram-nova-3","processingTime":2835,"rawWordCount":11,"fromFile":1,"iteration":17,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6994,"datetime":"2026-11-07 06:23:24.000","modelKey":"sw-deepgram-nova-3","processingTime":2807,"rawWordCount":11,"fromFile":1,"iteration":18,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6995,"datetime":"2026-11-07 06:23:28.000","modelKey":"sw-deepgram-nova-3","processingTime":2819,"rawWordCount":11,"fromFile":1,"iteration":19,"wall_seconds":3,"outcome":"ok"}
+,
+{"rowid":6996,"datetime":"2026-11-07 06:23:32.000","modelKey":"sw-deepgram-nova-3","processingTime":3791,"rawWordCount":11,"fromFile":1,"iteration":20,"wall_seconds":4,"outcome":"ok"}
+]
