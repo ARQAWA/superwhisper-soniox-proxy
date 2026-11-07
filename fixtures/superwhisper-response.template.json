@@ -1,0 +1,58 @@
+{
+  "metadata": {
+    "transaction_key": "",
+    "request_id": "",
+    "sha256": "",
+    "created": "",
+    "duration": 0,
+    "channels": 0,
+    "models": [
+      ""
+    ],
+    "model_info": {
+      "a23df42c-f390-4a31-90b9-c73ec96cf274": {
+        "name": "",
+        "version": "",
+        "arch": ""
+      }
+    }
+  },
+  "results": {
+    "channels": [
+      {
+        "alternatives": [
+          {
+            "transcript": "",
+            "confidence": 0,
+            "words": [
+              {
+                "word": "",
+                "start": 0,
+                "end": 0,
+                "confidence": 0,
+                "punctuated_word": ""
+              }
+            ],
+            "paragraphs": {
+              "transcript": "",
+              "paragraphs": [
+                {
+                  "sentences": [
+                    {
+                      "text": "",
+                      "start": 0,
+                      "end": 0
+                    }
+                  ],
+                  "num_words": 0,
+                  "start": 0,
+                  "end": 0
+                }
+              ]
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

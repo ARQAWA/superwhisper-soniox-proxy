@@ -1,0 +1,81 @@
+{
+  "captures": [
+    {
+      "captured_at": "2026-11-07T05:47:34.998Z",
+      "request": {
+        "host": "api.deepgram.com",
+        "method": "POST",
+        "path": "/v1/listen",
+        "query": "?punctuate=true&paragraphs=true&numerals=true&smart_format=true&language=ru&model=nova-3",
+        "contentType": "audio/ogg",
+        "contentLength": 10441,
+        "model": "nova-3",
+        "fieldNames": [
+          "punctuate",
+          "paragraphs",
+          "numerals",
+          "smart_format",
+          "language",
+          "model"
+        ],
+        "files": [
+          {
+            "field": "audio",
+            "filename": "audio.ogg",
+            "mimeType": "audio/ogg",
+            "size": 10441
+          }
+        ],
+        "audioField": "audio",
+        "targetCandidate": true,
+        "targetMatched": true,
+        "filename_ext": ".ogg"
+      },
+      "response": {
+        "status": 200,
+        "content_type": "application/json",
+        "bytes": 1128,
+        "schema": [
+          ": object",
+          "metadata: object",
+          "metadata.transaction_key: string",
+          "metadata.request_id: string",
+          "metadata.sha256: string",
+          "metadata.created: string",
+          "metadata.duration: number",
+          "metadata.channels: number",
+          "metadata.models: array",
+          "metadata.models[]: string",
+          "metadata.model_info: object",
+          "metadata.model_info.a23df42c-f390-4a31-90b9-c73ec96cf274: object",
+          "metadata.model_info.a23df42c-f390-4a31-90b9-c73ec96cf274.name: string",
+          "metadata.model_info.a23df42c-f390-4a31-90b9-c73ec96cf274.version: string",
+          "metadata.model_info.a23df42c-f390-4a31-90b9-c73ec96cf274.arch: string",
+          "results: object",
+          "results.channels: array",
+          "results.channels[]: object",
+          "results.channels[].alternatives: array",
+          "results.channels[].alternatives[]: object",
+          "results.channels[].alternatives[].transcript: string",
+          "results.channels[].alternatives[].confidence: number",
+          "results.channels[].alternatives[].words: array",
+          "results.channels[].alternatives[].words[]: object",
+          "results.channels[].alternatives[].words[].word: string",
+          "results.channels[].alternatives[].words[].start: number",
+          "results.channels[].alternatives[].words[].end: number",
+          "results.channels[].alternatives[].words[].confidence: number",
+          "results.channels[].alternatives[].words[].punctuated_word: string",
+          "results.channels[].alternatives[].paragraphs: object",
+          "results.channels[].alternatives[].paragraphs.transcript: string",
+          "results.channels[].alternatives[].paragraphs.paragraphs: array",
+          "results.channels[].alternatives[].paragraphs.paragraphs[]: object",
+          "results.channels[].alternatives[].paragraphs.paragraphs[].sentences: ...",
+          "results.channels[].alternatives[].paragraphs.paragraphs[].num_words: ...",
+          "results.channels[].alternatives[].paragraphs.paragraphs[].start: ...",
+          "results.channels[].alternatives[].paragraphs.paragraphs[].end: ..."
+        ],
+        "template_written": true
+      }
+    }
+  ]
+}

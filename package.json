@@ -1,0 +1,45 @@
+{
+  "name": "superwhisper-soniox-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local HTTPS/WebSocket proxy that routes SuperWhisper Nova 3 batch and realtime dictation to Soniox STT v6.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ARQAWA/superwhisper-soniox-proxy.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "recon": "DRY_RUN=true CAPTURE_TEMPLATE=true LOG_LEVEL=debug node dist/src/index.js",
+    "setup": "bash scripts/setup.sh",
+    "teardown": "bash scripts/teardown.sh",
+    "health": "bash scripts/health.sh",
+    "smoke:target": "bash scripts/smoke-target.sh",
+    "smoke:passthrough": "bash scripts/smoke-passthrough.sh",
+    "smoke:realtime": "node scripts/smoke-realtime.mjs"
+  },
+  "dependencies": {
+    "@fastify/busboy": "^3.2.0",
+    "@soniox/node": "^2.0.0",
+    "pino": "^9.14.0",
+    "ws": "^8.22.1",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "@types/ws": "^8.18.2",
+    "https-proxy-agent": "^7.0.6",
+    "pino-pretty": "^13.1.2",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "packageManager": "pnpm@10.12.1"
+}

@@ -1,0 +1,9 @@
+.backup/
+node_modules/
+dist/
+logs/
+certs/
+.env
+.DS_Store
+*.log
+.opencode/
