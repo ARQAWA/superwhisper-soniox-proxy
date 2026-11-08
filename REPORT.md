@@ -72,11 +72,35 @@ Synthetic PCM streamed through the same WebSocket path:
 | Short phrase | 85 chars, 11 words, 2 final messages (initial empty + final text), 1 `Metadata` |
 | Phrase + 2 s pause + phrase | 171 chars, 22 words, `final_length >= max_interim_length`, no drops |
 | Phrase + 8 s pause + phrase | 171 chars, 22 words, 0 interim drops, both key words present |
-| App dictation with pauses / without pauses | User confirmed the final text is complete and the earlier end-of-dictation truncation is gone |
+| App dictation with pauses / without pauses | Confirmed complete in the 2026-11-07 run; later intermittent failures showed the realtime stream could lag behind live audio |
 
 End-of-dictation truncation was investigated by replaying the app's own saved recordings through the proxy. For recording `1794041823`, the proxy final was 78 chars / 13 words, exactly matching the app's stored result (78 / 13); for `1794041791`, 141 chars / 24 words versus the app's 140 / 24. The final result was therefore complete. The perceived cut came from the short window between `CloseStream` (when Soniox is still decoding the tail) and the final response. The bridge now keeps the socket open for `WS_CLOSE_DELAY_MS` (350 ms) after the final result so the app can render it before the connection closes.
 
 The app's realtime recordings after the fix completed in 12–66 ms (`processingTime` in `meta.json`), i.e. they used the realtime result and did not fall back to batch.
+
+### Reliability regression and fix (2026-11-08)
+
+Later real sessions showed Soniox falling behind live audio while the app waited for the final. Examples from diagnostics:
+
+| Request | Audio | Close text | Outcome |
+| --- | --- | --- | --- |
+| `771b5169` | 20.25 s | 133 chars | App closed at ~1.5 s; 149 chars lost from the final |
+| `ef90fedc` | 53.14 s | 289 chars | App closed at ~1.5 s; 302 chars lost from the final |
+| `0ded010d` | 14.63 s | 73 chars | Lag at close; error `1011` instead of a partial final |
+
+The bridge now applies these rules:
+
+1. Probe lag every second. If Soniox is more than `SONIOX_RECONNECT_LAG_MS` behind for 1.5 s, or the session errors, open a fresh Soniox session and replay buffered audio from the last **safely finalized token** with `SONIOX_RECONNECT_OVERLAP_MS` overlap. The resume point is moved forward to the start of any final token crossing it, so a token/word is never cut: that token is discarded and transcribed again from its beginning. If the 64 MiB audio buffer is incomplete, reconnect/recovery is disabled and the final is not sent.
+2. Never send a partial final. If the app is about to stop and the realtime session is behind, silent, or missing its prefix batch, transcribe the full buffered PCM with `stt-async-v6` and keep the proxy side of the socket open with empty interim `Results` until the batch result is ready (`SONIOX_CLOSE_RECOVERY_MS`). Whether SuperWhisper itself waits is not yet verified.
+3. If full recovery fails or times out, clear the live interim text and close with code `1011` so the app can take its error path instead of pasting a truncated transcript.
+
+Verification:
+
+- Normal realtime smoke: 85 chars (short) and 171 chars (long with 2 s pause), final length >= longest interim.
+- Synthetic boundary harness: a final prefix plus a tail crossing the reconnect point resumed at the crossing token's start, replayed ~2 s, and produced `alpha` + `beta gamma` without dropping `alpha`.
+- Synthetic fault harness: session error reconnects and replays audio; lag triggers reconnect; batch fallback returns the full final; forced batch failure closes `1011` with no final.
+- Real 21.2 s recording sent faster than real time: realtime lagged, batch recovery returned a 343-character final after 8.1 s, with 11 empty interims sent to a **synthetic WebSocket client**. This proves the proxy side of the hold-open; it does not prove that SuperWhisper resets its own ~1.5 s timeout. No real-app hold-open test has been recorded yet. If SuperWhisper closes first, the proxy cannot deliver a batch final or a `1011`; diagnostics record `client_closed_during_recovery`.
+- The deployed proxy was restarted and its health endpoint reports `ws_mode=soniox`.
 
 ### Pass-through
 

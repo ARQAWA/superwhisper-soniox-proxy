@@ -80,6 +80,30 @@ else
   bad "Soniox key is missing; run scripts/setup.sh"
 fi
 
+printf 'diagnostics\n'
+diag_dir="${DIAG_DIR:-$HOME/Library/Caches/soniox-proxy/diagnostics}"
+if [ -d "$diag_dir" ]; then
+  ok "diagnostics dir: $diag_dir"
+  traces="$(find "$diag_dir/sessions" -type f -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')"
+  ok "session traces: ${traces:-0}"
+  if [ -f "$diag_dir/summary.jsonl" ]; then
+    last_status="$(tail -n 1 "$diag_dir/summary.jsonl" 2>/dev/null | jq -r '.status // "unknown"' 2>/dev/null)"
+    ok "last session status: ${last_status:-unknown}"
+  else
+    warn "no session summaries yet"
+  fi
+  if [ -f "$diag_dir/anomalies.jsonl" ]; then
+    anomalies="$(wc -l <"$diag_dir/anomalies.jsonl" 2>/dev/null | tr -d ' ')"
+    if [ "${anomalies:-0}" -gt 0 ]; then
+      warn "anomaly records: $anomalies (review: bash scripts/diagnostics.sh)"
+    else
+      ok "no anomaly records"
+    fi
+  fi
+else
+  warn "diagnostics dir missing: $diag_dir (start the new proxy build to enable)"
+fi
+
 printf 'system proxy\n'
 enabled="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
 server="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Server:/{print $2}')"

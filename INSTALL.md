@@ -113,6 +113,7 @@ If the CA was also trusted in the System keychain, the script prints the one `su
 | SuperWhisper does not trust the proxy | Run `bash scripts/health.sh`, approve the macOS certificate dialog, then quit/reopen SuperWhisper. |
 | LaunchAgent does not become healthy | Run `bash scripts/setup.sh` (nohup mode) or inspect `logs/proxy.stderr.log`. |
 | Realtime falls back to batch | Check `logs/proxy.log` for `soniox realtime connected` / `CloseStream`; confirm the active mode is `soniox-target`. |
+| Realtime hangs or cuts the end | Run `bash scripts/diagnostics.sh`; review `client_closed_before_final` and `close_to_finish_ms` in `~/Library/Caches/soniox-proxy/diagnostics/`. |
 | Batch is slow | Soniox async processing p95 is around 4 s; realtime dictation avoids it. |
 | CA expired | Run `bash scripts/gen-certs.sh`, re-trust, restart SuperWhisper. |
 

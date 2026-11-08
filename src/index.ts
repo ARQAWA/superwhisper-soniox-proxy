@@ -1,11 +1,13 @@
 import { loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
+import { Diagnostics, diagnosticsOptionsFromConfig } from "./diagnostics.js";
 import { startProxy } from "./proxy.js";
 import { SonioxService } from "./soniox.js";
 
 async function main(): Promise<void> {
   const config = loadConfig();
   const logger = createLogger(config);
+  const diagnostics = new Diagnostics(diagnosticsOptionsFromConfig(config), logger);
   logger.info(
     {
       dry_run: config.DRY_RUN,
@@ -15,12 +17,14 @@ async function main(): Promise<void> {
       target_model: config.TARGET_MODEL,
       soniox_model: config.SONIOX_MODEL,
       port: config.PROXY_PORT,
+      diagnostics_enabled: diagnostics.isEnabled,
+      diagnostics_dir: diagnostics.dir,
     },
     "starting soniox proxy",
   );
 
-  const soniox = new SonioxService(config, logger);
-  const proxy = await startProxy({ config, logger, soniox });
+  const soniox = new SonioxService(config, logger, diagnostics);
+  const proxy = await startProxy({ config, logger, soniox, diagnostics });
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, "shutting down");

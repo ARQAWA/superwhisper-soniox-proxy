@@ -3,7 +3,8 @@ import { SonioxNodeClient } from "@soniox/node";
 import type { RealtimeSttSession } from "@soniox/node";
 import type { TranscriptToken } from "@soniox/node";
 import type { AppConfig } from "./config.js";
-import { languageHints } from "./config.js";
+import type { Diagnostics } from "./diagnostics.js";
+import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
 import type { ParsedFile } from "./types.js";
 
@@ -105,6 +106,7 @@ export class SonioxService {
   constructor(
     private readonly config: AppConfig,
     private readonly logger: Logger,
+    private readonly diagnostics?: Diagnostics,
   ) {
     if (!config.sonioxApiKey) {
       throw new Error("SONIOX_API_KEY is not configured (env, Keychain, or ~/.config/soniox-proxy/api-key)");
@@ -138,6 +140,7 @@ export class SonioxService {
     fields: Record<string, string>,
     requestId: string,
     diarize: boolean,
+    purpose = "request",
   ): Promise<SonioxResult> {
     const audio = normalizeAudio(file, fields);
     const lang = languageFromRequest(fields);
@@ -175,9 +178,21 @@ export class SonioxService {
           audio_duration_ms: durationMs,
           latency_ms: Date.now() - started,
           language: lang.language,
+          purpose,
         },
         "soniox transcription completed",
       );
+      this.diagnostics?.recordBatch({
+        request_id: requestId,
+        status: "ok",
+        purpose,
+        client_reference_id: clientReferenceId,
+        soniox_transcription_id: transcription.id,
+        audio_bytes: audio.data.length,
+        audio_duration_ms: durationMs,
+        latency_ms: Date.now() - started,
+        language: lang.language,
+      });
       return {
         text: transcript.text,
         tokens: transcript.tokens,
@@ -187,16 +202,27 @@ export class SonioxService {
         language: transcript.tokens.find((t) => t.language)?.language ?? lang.language,
       };
     } catch (err) {
+      const label = errorLabel(err);
       this.logger.error(
         {
           request_id: requestId,
           client_reference_id: clientReferenceId,
           audio_bytes: audio.data.length,
           latency_ms: Date.now() - started,
-          error: err instanceof Error ? err.message : String(err),
+          error: label,
+          purpose,
         },
         "soniox transcription failed",
       );
+      this.diagnostics?.recordBatch({
+        request_id: requestId,
+        status: "error",
+        purpose,
+        client_reference_id: clientReferenceId,
+        audio_bytes: audio.data.length,
+        latency_ms: Date.now() - started,
+        error: label,
+      });
       throw err;
     } finally {
       this.semaphore.release();

@@ -5,6 +5,8 @@ import net from "node:net";
 import { dirname, extname } from "node:path";
 import tls from "node:tls";
 import type { AppConfig } from "./config.js";
+import type { Diagnostics } from "./diagnostics.js";
+import { errorLabel } from "./errors.js";
 import { errorPayload, readRequestBody, sendJson, sendUpstreamResponse, upstreamErrorStatus } from "./http-utils.js";
 import type { Logger } from "./logger.js";
 import { parseMultipart } from "./multipart.js";
@@ -141,10 +143,11 @@ export interface ProxyDeps {
   config: AppConfig;
   logger: Logger;
   soniox: SonioxService;
+  diagnostics: Diagnostics;
 }
 
 export function createRequestHandler(deps: ProxyDeps) {
-  const { config, logger, soniox } = deps;
+  const { config, logger, soniox, diagnostics } = deps;
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = randomUUID();
@@ -168,6 +171,8 @@ export function createRequestHandler(deps: ProxyDeps) {
         ws_mode: config.WS_MODE,
         soniox_realtime_model: config.SONIOX_REALTIME_MODEL,
         uptime_seconds: Math.round(process.uptime()),
+        diagnostics_enabled: diagnostics.isEnabled,
+        diagnostics_dir: diagnostics.dir,
       });
       return;
     }
@@ -178,6 +183,7 @@ export function createRequestHandler(deps: ProxyDeps) {
     } catch (err) {
       const status = (err as { statusCode?: number }).statusCode ?? 413;
       logger.warn({ request_id: requestId, host, method: req.method, path, status }, "request body rejected");
+      diagnostics.recordError("request_body", err, { request_id: requestId, host, path, status });
       sendJson(res, status, errorPayload(err instanceof Error ? err.message : "request body error", "request_too_large"));
       return;
     }
@@ -197,7 +203,7 @@ export function createRequestHandler(deps: ProxyDeps) {
         parsed = await parseMultipart(body, contentType, config.MAX_BODY_BYTES);
       } catch (err) {
         logger.warn(
-          { request_id: requestId, host, method: meta.method, path, error: err instanceof Error ? err.message : String(err) },
+          { request_id: requestId, host, method: meta.method, path, error: errorLabel(err) },
           "multipart parse failed; passing through",
         );
       }
@@ -269,10 +275,15 @@ export function createRequestHandler(deps: ProxyDeps) {
             target_matched: true,
             upstream_forwarded: false,
             latency_ms: Date.now() - started,
-            error: err instanceof Error ? err.message : String(err),
+            error: errorLabel(err),
           },
           "soniox target failed",
         );
+        diagnostics.recordError("batch_target", err, {
+          request_id: requestId,
+          status,
+          latency_ms: Date.now() - started,
+        });
         sendJson(res, status, errorPayload(err instanceof Error ? err.message : "transcription failed", "soniox_error"));
         return;
       }
@@ -350,10 +361,17 @@ export function createRequestHandler(deps: ProxyDeps) {
           status,
           upstream_forwarded: false,
           latency_ms: Date.now() - started,
-          error: err instanceof Error ? err.message : String(err),
+          error: errorLabel(err),
         },
         "upstream request failed",
       );
+      diagnostics.recordError("upstream", err, {
+        request_id: requestId,
+        host,
+        path,
+        status,
+        latency_ms: Date.now() - started,
+      });
       sendJson(res, status, errorPayload(err instanceof Error ? err.message : "upstream error", "upstream_error"));
     }
   };
@@ -377,7 +395,8 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const makeServer = (): http.Server => {
     const server = http.createServer((req, res) => {
       handler(req, res).catch((err) => {
-        logger.error({ error: err instanceof Error ? err.message : String(err) }, "unhandled proxy handler error");
+        logger.error({ error: errorLabel(err) }, "unhandled proxy handler error");
+        deps.diagnostics.recordError("handler", err);
         if (!res.headersSent) sendJson(res, 500, errorPayload("proxy internal error", "proxy_error"));
         else res.end();
       });
@@ -398,7 +417,8 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
     const cert = readFileSync(certPath);
     const sharedHttp = http.createServer((req, res) => {
       handler(req, res).catch((err) => {
-        logger.error({ error: err instanceof Error ? err.message : String(err) }, "unhandled MITM handler error");
+        logger.error({ error: errorLabel(err) }, "unhandled MITM handler error");
+        deps.diagnostics.recordError("mitm_handler", err);
         if (!res.headersSent) sendJson(res, 500, errorPayload("proxy internal error", "proxy_error"));
         else res.end();
       });
@@ -420,7 +440,7 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
     });
   } catch (err) {
     logger.warn(
-      { error: err instanceof Error ? err.message : String(err), cert_dir: config.CERT_DIR },
+      { error: errorLabel(err), cert_dir: config.CERT_DIR },
       "MITM certificate not loaded; only CONNECT tunneling will work",
     );
   }
@@ -453,7 +473,7 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
         });
         clientSocket.on("error", () => upstream.destroy());
       } catch (err) {
-        logger.warn({ host: hostname, error: err instanceof Error ? err.message : String(err) }, "CONNECT tunnel resolve error");
+        logger.warn({ host: hostname, error: errorLabel(err) }, "CONNECT tunnel resolve error");
         clientSocket.end("HTTP/1.1 502 Bad Gateway\r\n\r\n");
       }
     })();
