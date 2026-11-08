@@ -8,9 +8,16 @@ const boolFromEnv = (defaultValue: boolean) =>
   z
     .string()
     .optional()
-    .transform((v) => {
+    .transform((v, ctx) => {
       if (v === undefined || v === "") return defaultValue;
-      return ["1", "true", "yes", "on"].includes(v.toLowerCase());
+      const lower = v.toLowerCase();
+      if (["1", "true", "yes", "on"].includes(lower)) return true;
+      if (["0", "false", "no", "off"].includes(lower)) return false;
+      ctx.addIssue({
+        code: "custom",
+        message: `expected a boolean (true/false, 1/0, yes/no, on/off), got "${v}"`,
+      });
+      return false;
     });
 
 const EnvSchema = z.object({
@@ -38,6 +45,11 @@ const EnvSchema = z.object({
   MAX_BODY_BYTES: z.coerce.number().int().min(1024).default(64 * 1024 * 1024),
   SONIOX_MODEL: z.string().default("stt-async-v6"),
   SONIOX_REALTIME_MODEL: z.string().default("stt-rt-v6"),
+  SONIOX_ENDPOINT_DETECTION: boolFromEnv(true),
+  SONIOX_ENDPOINT_SENSITIVITY: z.coerce.number().min(-1).max(1).default(0),
+  SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL: z.coerce.number().int().min(0).max(3).default(0),
+  SONIOX_MAX_ENDPOINT_DELAY_MS: z.coerce.number().int().min(500).max(3000).default(2000),
+  SONIOX_KEEPALIVE_MS: z.coerce.number().int().min(0).max(15000).default(10000),
   SONIOX_PREFIX_BATCH_CONNECT_MS: z.coerce.number().int().min(0).max(10000).default(1200),
   SONIOX_RECONNECT_LAG_MS: z.coerce.number().int().min(1000).max(30000).default(4000),
   SONIOX_RECONNECT_MAX: z.coerce.number().int().min(0).max(10).default(3),

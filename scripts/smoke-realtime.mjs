@@ -46,7 +46,30 @@ function pcmFromWav(path) {
   return wav.subarray(44);
 }
 
+function normalizedWords(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+// The long fixture is the same phrase twice with a 2 s pause. Requiring a
+// repeated normalized n-gram proves the second phrase survived, without
+// printing or embedding transcript text.
+function hasRepeatedPhrase(words, length = 6) {
+  for (let start = 0; start + length * 2 <= words.length; start += 1) {
+    const phrase = words.slice(start, start + length).join(" ");
+    for (let next = start + length; next + length <= words.length; next += 1) {
+      if (words.slice(next, next + length).join(" ") === phrase) return true;
+    }
+  }
+  return false;
+}
+
 const basePcm = pcmFromWav(audioPath);
+
 // Optionally insert a 2 second pause and repeat the phrase to exercise Soniox's
 // sliding token window (the case that used to truncate text before a pause).
 const pcm = longMode
@@ -110,7 +133,13 @@ ws.on("message", (data) => {
 ws.on("close", () => {
   clearTimeout(timer);
   const words = finalText.split(/\s+/).filter(Boolean).length;
-  const ok = finalText.length > 0 && finalText.length >= maxInterim && words >= minWords && metadata > 0;
+  const repeatedPhrase = hasRepeatedPhrase(normalizedWords(finalText));
+  const ok =
+    finalText.length > 0 &&
+    finalText.length >= maxInterim &&
+    words >= minWords &&
+    metadata > 0 &&
+    (!longMode || repeatedPhrase);
   console.log(
     JSON.stringify(
       {
@@ -120,6 +149,7 @@ ws.on("close", () => {
         max_interim_length: maxInterim,
         finals,
         metadata_messages: metadata,
+        repeated_phrase: repeatedPhrase,
         mode: longMode ? "long-with-pause" : "short",
       },
       null,

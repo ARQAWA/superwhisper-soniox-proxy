@@ -94,7 +94,7 @@ bash scripts/health.sh            # proxy, CA, key, system proxy, signature, SIP
 bash scripts/smoke-target.sh      # batch through Soniox (no transcript printed)
 bash scripts/smoke-passthrough.sh # raw CONNECT + MITM pass-through
 node scripts/smoke-realtime.mjs   # realtime, 85 chars / 11 words, no truncation
-SMOKE_LONG=1 node scripts/smoke-realtime.mjs  # adds a 2 s pause; 171 chars / 22 words
+SMOKE_LONG=1 node scripts/smoke-realtime.mjs  # adds a 2 s pause; 172 chars / 22 words, both repetitions verified
 pnpm test                         # unit tests
 ```
 
@@ -151,6 +151,11 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SCRIBE_MODEL` | `scribe_v2_realtime` | Expected upstream realtime model |
 | `SONIOX_MODEL` | `stt-async-v6` | Batch model |
 | `SONIOX_REALTIME_MODEL` | `stt-rt-v6` | Realtime model |
+| `SONIOX_ENDPOINT_DETECTION` | `true` | Soniox semantic endpointing; disabled automatically for diarization |
+| `SONIOX_ENDPOINT_SENSITIVITY` | `0` | Endpoint likelihood, `-1.0` to `1.0` |
+| `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL` | `0` | Endpoint latency profile, `0`–`3` |
+| `SONIOX_MAX_ENDPOINT_DELAY_MS` | `2000` | Hard upper bound after speech ends, `500`–`3000` |
+| `SONIOX_KEEPALIVE_MS` | `10000` | Send Soniox keepalive after this much audio silence; `0` disables |
 | `SONIOX_PREFIX_BATCH_CONNECT_MS` | `1200` | If Soniox connects slower, send queued audio through batch instead of a burst (`0` disables) |
 | `SONIOX_RECONNECT_LAG_MS` | `4000` | Reconnect when Soniox is this far behind live audio |
 | `SONIOX_RECONNECT_MAX` | `3` | Maximum reconnect attempts per dictation |
@@ -186,7 +191,26 @@ Soniox returns subword pieces and periodically drops the prefix that it has alre
 4. sends one final `Results` segment when the app sends `CloseStream`,
 5. ends with a `Metadata` message and closes the socket after a short delay (`WS_CLOSE_DELAY_MS`, default 350 ms) so the app can render the final text.
 
-Endpoint detection is disabled so a long dictation is not chopped into tiny final segments. See `src/realtime.ts` and `src/tokens.ts`.
+Endpoint detection is enabled by default with Soniox's conservative settings (`endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`, `max_endpoint_delay_ms=2000`). Soniox finalizes pending tokens at natural pauses, which shortens the CloseStream tail; it is disabled automatically when `diarize=true`, because Soniox documents that endpointing reduces diarization accuracy. `SONIOX_ENDPOINT_DETECTION=false` restores the old single-segment behavior. For lower latency at a small accuracy risk, use Soniox's recommended starting point: `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL=2`, `SONIOX_ENDPOINT_SENSITIVITY=0.3`, and optionally `SONIOX_MAX_ENDPOINT_DELAY_MS=1500`.
+
+If no binary audio frame arrives for `SONIOX_KEEPALIVE_MS` (default 10 s), the bridge sends Soniox's `{"type":"keepalive"}` control. Soniox ends an audio-idle stream after 20 s; this preserves context through a long pause. Soniox bills the full stream duration, so a kept-open stream still accrues cost; set `SONIOX_KEEPALIVE_MS=0` to disable this behavior.
+
+At `CloseStream`, the bridge uses Soniox's graceful empty-text finish and waits for the `finished` response. It does not send a manual `finalize` at close; the app's own `Finalize` control is forwarded when present.
+
+### Cost and reliability tradeoffs
+
+| Choice | Gain | Cost or risk |
+| --- | --- | --- |
+| Endpoint detection on, conservative defaults | Final tokens sooner; shorter CloseStream tail | Soniox may finalize slightly earlier, with a small recognition-accuracy risk |
+| Endpoint level `2`, sensitivity `0.3`, max `1500` | Lowest endpoint latency | More segments and a larger accuracy risk; opt-in only |
+| Endpoint off for diarization | Best diarization accuracy | No endpoint latency benefit |
+| Keepalive every 10 s | Survives pauses longer than Soniox's 20 s audio timeout | Billed stream duration continues while the pause lasts |
+| Prefix batch after a slow handshake | Prevents a large queued burst from leaving realtime permanently behind | Duplicate async cost for the queued prefix; measured 8 of 114 sessions before this tuning |
+| Reconnect on sustained lag | Recovers a live stream that is behind | New realtime stream plus overlap; duplicates a short span |
+| Full batch recovery at close | Never sends a partial final | Duplicates the whole recording with async STT; only on failure |
+| `SONIOX_PREFIX_BATCH_CONNECT_MS=0`, `SONIOX_RECONNECT_MAX=0` | Minimum calls | Tail-loss risk when the handshake or live stream stalls |
+
+Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/hour` async. The reliability fallbacks therefore add only a small premium when they trigger; they are retained because the app closes about 1.5 s after stop and a lost tail cannot be recovered later.
 
 If the Soniox WebSocket handshake takes longer than `SONIOX_PREFIX_BATCH_CONNECT_MS` (default 1200 ms), the audio queued during the handshake is transcribed with `stt-async-v6` instead of being burst into the realtime session. The realtime session then starts at the live edge. A burst would leave Soniox permanently behind live audio, and the app closes before the tail is finalized. The prefix tokens are prepended to the same transcript, with live token timestamps shifted by the prefix duration. Diagnostics record `prefix_batch_*` events and `prefix_missing_at_final` if the prefix is still pending at close.
 

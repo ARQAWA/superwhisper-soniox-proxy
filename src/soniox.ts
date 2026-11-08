@@ -121,7 +121,11 @@ export class SonioxService {
     sampleRate: number;
     channels: number;
     diarize: boolean;
-    endpointDetection?: boolean;
+    endpointDetection: boolean;
+    endpointSensitivity: number;
+    endpointLatencyAdjustmentLevel: number;
+    maxEndpointDelayMs: number;
+    clientReferenceId: string;
   }): RealtimeSttSession {
     return this.client.realtime.stt({
       model: this.config.SONIOX_REALTIME_MODEL,
@@ -131,7 +135,15 @@ export class SonioxService {
       language_hints: options.languageHints,
       enable_language_identification: options.identifyLanguage,
       enable_speaker_diarization: options.diarize,
-      enable_endpoint_detection: options.endpointDetection ?? true,
+      client_reference_id: options.clientReferenceId,
+      enable_endpoint_detection: options.endpointDetection,
+      ...(options.endpointDetection
+        ? {
+            endpoint_sensitivity: options.endpointSensitivity,
+            endpoint_latency_adjustment_level: options.endpointLatencyAdjustmentLevel,
+            max_endpoint_delay_ms: options.maxEndpointDelayMs,
+          }
+        : {}),
     });
   }
 

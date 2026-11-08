@@ -273,6 +273,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   const diarize = url.searchParams.get("diarize") === "true";
   const actualSampleRate = Number.isFinite(sampleRate) ? sampleRate : 16000;
   const actualChannels = Number.isFinite(channels) ? channels : 1;
+  const endpointDetection = config.SONIOX_ENDPOINT_DETECTION && !diarize;
 
   const diag = deps.diagnostics.startRealtime(requestId, {
     model: config.TARGET_MODEL,
@@ -282,7 +283,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     language,
     identifyLanguage,
     diarize,
-    endpointDetection: false,
+    endpointDetection,
     sonioxModel: config.SONIOX_REALTIME_MODEL,
     closeDelayMs: config.WS_CLOSE_DELAY_MS,
   });
@@ -321,6 +322,8 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   let closeTimer: NodeJS.Timeout | null = null;
   let closeDeadlineTimer: NodeJS.Timeout | undefined;
   let lagTimer: NodeJS.Timeout | undefined;
+  let keepaliveTimer: NodeJS.Timeout | undefined;
+  let lastAudioAt = Date.now();
   let recoveryTimer: NodeJS.Timeout | undefined;
   let recoveryHoldTimer: NodeJS.Timeout | undefined;
   let recoveryStarted = false;
@@ -540,6 +543,10 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     completed = true;
     clearTimeout(closeDeadlineTimer);
     clearTimeout(recoveryTimer);
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = undefined;
+    }
     if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
     if (lagTimer) clearInterval(lagTimer);
     const tokens = allTokens();
@@ -658,6 +665,10 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     terminalStatus = "error";
     clearTimeout(closeDeadlineTimer);
     clearTimeout(recoveryTimer);
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = undefined;
+    }
     if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
     if (lagTimer) clearInterval(lagTimer);
     if (closeTimer) {
@@ -1141,9 +1152,11 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
       sampleRate: actualSampleRate,
       channels: actualChannels,
       diarize,
-      // One continuous utterance keeps the app's live text stable; Soniox still
-      // finalizes tokens internally, we just do not expose endpoint breaks.
-      endpointDetection: false,
+      endpointDetection,
+      endpointSensitivity: config.SONIOX_ENDPOINT_SENSITIVITY,
+      endpointLatencyAdjustmentLevel: config.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+      maxEndpointDelayMs: config.SONIOX_MAX_ENDPOINT_DELAY_MS,
+      clientReferenceId: `sw-rt-${requestId}`,
     });
     session = target;
     attachSession(target, generation, first);
@@ -1154,6 +1167,35 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   }
 
   openSession(0, true);
+
+  if (config.SONIOX_KEEPALIVE_MS > 0) {
+    const checkMs = Math.min(config.SONIOX_KEEPALIVE_MS, 1000);
+    keepaliveTimer = setInterval(() => {
+      if (
+        !sessionReady ||
+        !session ||
+        reconnecting ||
+        reconnectLimitHit ||
+        recoveryStarted ||
+        closing ||
+        completed ||
+        clientClosing
+      ) {
+        return;
+      }
+      const idleMs = Date.now() - lastAudioAt;
+      if (idleMs < config.SONIOX_KEEPALIVE_MS) return;
+      try {
+        session.keepAlive();
+        lastAudioAt = Date.now();
+        diag.event("keepalive_sent", { idle_ms: idleMs });
+        logger.debug({ request_id: requestId, idle_ms: idleMs }, "soniox realtime keepalive");
+      } catch (err) {
+        diag.event("keepalive_failed", { error: errorLabel(err) });
+      }
+    }, checkMs);
+    keepaliveTimer.unref?.();
+  }
 
   lagTimer = setInterval(() => {
     if (!sessionReady || reconnecting || reconnectLimitHit || recoveryUnavailable || closing || completed || clientClosing) return;
@@ -1173,6 +1215,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   client.on("message", (data, isBinary) => {
     logClientFrame(logger, requestId, data, isBinary, model);
     if (isBinary) {
+      lastAudioAt = Date.now();
       diag.audioFrame(rawByteLength(data));
       const buf = toBuffer(data);
       appendAudio(buf);
@@ -1317,6 +1360,10 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     logger.info({ request_id: requestId, code, reason_bytes: reason.length }, "ws soniox client closed");
     clearTimeout(closeDeadlineTimer);
     clearTimeout(recoveryTimer);
+    if (keepaliveTimer) {
+      clearInterval(keepaliveTimer);
+      keepaliveTimer = undefined;
+    }
     if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
     if (lagTimer) clearInterval(lagTimer);
     if (closeTimer) {

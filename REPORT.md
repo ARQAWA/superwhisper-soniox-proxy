@@ -35,7 +35,7 @@ The proxy is selected by the standard macOS secure web proxy (`127.0.0.1:8443`).
 
 1. Accept the WSS upgrade on `api.deepgram.com/v1/listen`.
 2. Detect target traffic from the query model plus the active SuperWhisper mode (`sw-deepgram-nova-3`).
-3. Open a Soniox `stt-rt-v6` session with `pcm_s16le`, 16 kHz, mono, endpoint detection off.
+3. Open a Soniox `stt-rt-v6` session with `pcm_s16le`, 16 kHz, mono, endpoint detection on by default (conservative Soniox settings; disabled for diarization).
 4. Forward binary PCM frames; handle `CloseStream`, `Finalize`, `KeepAlive`.
 5. Accumulate finalized Soniox tokens across the sliding window.
 6. Emit Deepgram-shaped interim `Results`, one final `Results` at close, then `Metadata`, then close.
@@ -102,6 +102,27 @@ Verification:
 - Real 21.2 s recording sent faster than real time: realtime lagged, batch recovery returned a 343-character final after 8.1 s, with 11 empty interims sent to a **synthetic WebSocket client**. This proves the proxy side of the hold-open; it does not prove that SuperWhisper resets its own ~1.5 s timeout. No real-app hold-open test has been recorded yet. If SuperWhisper closes first, the proxy cannot deliver a batch final or a `1011`; diagnostics record `client_closed_during_recovery`.
 - The deployed proxy was restarted and its health endpoint reports `ws_mode=soniox`.
 
+### Realtime tuning (2026-11-08)
+
+Soniox guidance reviewed: [real-time transcription](https://soniox.com/docs/stt/rt/real-time-transcription), [endpoint detection](https://soniox.com/docs/stt/rt/endpoint-detection), [manual finalization](https://soniox.com/docs/stt/rt/manual-finalization), [connection keepalive](https://soniox.com/docs/stt/rt/connection-keepalive), [WebSocket API](https://docs.soniox.com/api-reference/stt/websocket-api), and [pricing](https://soniox.com/pricing).
+
+Changes:
+
+- Enabled Soniox endpoint detection with its conservative defaults (`endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`, `max_endpoint_delay_ms=2000`). The SDK filters `<end>`/`<fin>` tokens, so the app's text contract is unchanged. Endpoint detection is disabled when the app requests diarization, because Soniox documents that it reduces diarization accuracy.
+- Added an idle keepalive: after `SONIOX_KEEPALIVE_MS` (default 10 s) without binary audio, the bridge sends `{"type":"keepalive"}`. This prevents Soniox's 20 s audio-idle timeout from ending a paused dictation. The stream stays billable while held open.
+- Added `client_reference_id: sw-rt-<requestId>` so realtime requests can be matched with Soniox usage logs.
+- Kept the existing slow-handshake prefix batch, sustained-lag reconnect, and full batch recovery. They are the reliability premium; they are not on the normal path.
+
+Verification:
+
+- `pnpm test`: 27 passed; `pnpm build`: passed.
+- Short smoke: 85 chars / 11 words; long-with-2 s-pause smoke: 172 chars / 22 words; final length >= longest interim in both. The long smoke also requires a repeated normalized 6-word sequence and reports `repeated_phrase: true`, so both repetitions are present without printing transcript text.
+- The long trace records `endpoint_detection=true` and two `soniox_endpoint` events, so endpointing is active without changing the final text.
+- 22 s idle smoke with no app audio or app keepalive: two `keepalive_sent` events at 10.2 s and 10.0 s idle, then a complete 85-char / 11-word final. This proves the proxy keeps the Soniox stream alive past its 20 s audio timeout.
+- Close-to-finish in the three optimized smokes: 222 ms, 248 ms, and 203 ms; no batch recovery was needed.
+
+The defaults add no per-stream Soniox charge. The fallback cost remains opt-in by failure: before this tuning, diagnostics recorded prefix batches in 8 of 114 sessions and no full batch recoveries or reconnects. See the README tradeoff table for the cost/latency/accuracy alternatives.
+
 ### Scribe recovery (2026-11-08)
 
 SuperWhisper's **Scribe Target** mode uses `sw-elevenlabs-scribe` and opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy's first recovery version buffered PCM and suppressed upstream `committed_transcript` messages. That was unsafe for this app: it has no `xi-api-key` or `Authorization` header, so the batch request returned HTTP 401 with `invalid_api_key`, and the app closed its socket about 1.5 s after stop, before a batch final could arrive. The saved transcript lost its tail.
@@ -110,7 +131,7 @@ The fix is live-only: the proxy forwards partial and committed transcript messag
 
 Verification:
 
-- `pnpm test`: 24 tests passed.
+- `pnpm test`: 27 tests passed.
 - `pnpm build`: passed.
 - Scribe close logs record code and reason byte length only; passthrough and Soniox close logs do the same.
 - Other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited while Scribe is active.
