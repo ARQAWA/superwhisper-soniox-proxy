@@ -12,6 +12,7 @@ MODE_NAME="${MODE_NAME:-Soniox Target}"
 LANGUAGE="${LANGUAGE:-ru}"
 VOICE_MODEL_ID="${VOICE_MODEL_ID:-sw-deepgram-nova-3}"
 TEMPLATE_MODE="${TEMPLATE_MODE:-message}"
+PRESERVE_MODE="${PRESERVE_MODE:-0}"
 NO_RESTART="${NO_RESTART:-0}"
 DOCS_DIR="${SUPERWHISPER_DOCS_DIR:-$HOME/Documents/superwhisper}"
 
@@ -24,6 +25,11 @@ require_cmd() {
 
 require_cmd jq
 require_cmd defaults
+require_cmd pgrep
+
+app_running() {
+  pgrep -x -i superwhisper >/dev/null 2>&1
+}
 
 if [ ! -d "$DOCS_DIR/modes" ]; then
   printf 'SuperWhisper modes directory not found; opening SuperWhisper once...\n'
@@ -44,11 +50,38 @@ else
 fi
 
 printf 'closing SuperWhisper before editing settings...\n'
-osascript -e 'tell application "superwhisper" to quit' >/dev/null 2>&1 || true
-sleep 2
+if app_running; then
+  osascript -e 'tell application "superwhisper" to quit' >/dev/null 2>&1 || true
+  for _ in $(seq 1 25); do
+    if ! app_running; then
+      break
+    fi
+    sleep 0.2
+  done
+  if app_running; then
+    printf 'SuperWhisper did not quit; close it and re-run this script.\n' >&2
+    exit 1
+  fi
+else
+  printf 'SuperWhisper is not running\n'
+fi
+
+existing_mode="$DOCS_DIR/modes/$MODE_KEY.json"
+if [ "$PRESERVE_MODE" = "1" ] && [ -f "$existing_mode" ]; then
+  # Re-check after the app exits: SuperWhisper may write an in-memory change
+  # back on quit. Do not mutate or activate an incompatible mode.
+  if ! jq -e --arg model "$VOICE_MODEL_ID" '.voiceModelID == $model and .realtimeOutput == true and .diarize == false' "$existing_mode" >/dev/null; then
+    printf 'refusing to modify or activate an incompatible existing mode: %s\n' "$existing_mode" >&2
+    exit 1
+  fi
+fi
 
 tmp_mode="$(mktemp "$DOCS_DIR/modes/.$MODE_KEY.XXXXXX")"
-if [ -n "$template_path" ] && [ -f "$template_path" ]; then
+if [ "$PRESERVE_MODE" = "1" ] && [ -f "$existing_mode" ]; then
+  # Update only the language and auto-paste. This is used by start-fast.sh so a
+  # customized mode keeps its prompt, activation rules, and other settings.
+  jq --arg language "$LANGUAGE" '.language = $language | .autoPaste = true' "$existing_mode" >"$tmp_mode"
+elif [ -n "$template_path" ] && [ -f "$template_path" ]; then
   jq \
     --arg key "$MODE_KEY" \
     --arg name "$MODE_NAME" \
@@ -60,6 +93,7 @@ if [ -n "$template_path" ] && [ -f "$template_path" ]; then
      | .voiceModelID = $model
      | .language = $language
      | .languageModelID = ""
+     | .autoPaste = true
      | .realtimeOutput = true
      | .diarize = false
      | .prompt = ""
@@ -79,7 +113,7 @@ else
       contextTemplate: "Use the copied text as context to complete this task.\n\nCopied text: ",
       description: "", diarize: false, iconName: "", key: $key, language: $language,
       languageModelID: "", literalPunctuation: false, name: $name, prompt: "",
-      promptExamples: [], realtimeOutput: true, script: "", scriptEnabled: false,
+      promptExamples: [], autoPaste: true, realtimeOutput: true, script: "", scriptEnabled: false,
       tone: "casual", translateToEnglish: false, type: "voice",
       useSystemAudio: false, version: 1, voiceModelID: $model}' >"$tmp_mode"
 fi
@@ -101,7 +135,7 @@ defaults write "$APP_DOMAIN" activeModeKey -string "$MODE_KEY"
 defaults write "$APP_DOMAIN" lastSelectedModeKey -string "$MODE_KEY"
 
 printf 'mode %s is ready: %s\n' "$MODE_KEY" "$DOCS_DIR/modes/$MODE_KEY.json"
-jq '{key, name, voiceModelID, language, realtimeOutput}' "$DOCS_DIR/modes/$MODE_KEY.json"
+jq '{key, name, voiceModelID, language, realtimeOutput, autoPaste}' "$DOCS_DIR/modes/$MODE_KEY.json"
 
 if [ "$NO_RESTART" = "1" ]; then
   printf 'SuperWhisper left closed (NO_RESTART=1)\n'

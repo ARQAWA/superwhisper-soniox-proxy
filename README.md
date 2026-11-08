@@ -149,6 +149,11 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SCRIBE_PATH` | `/v1/speech-to-text/realtime` | Scribe realtime path |
 | `SCRIBE_VOICE_MODEL_ID` | `sw-elevenlabs-scribe` | SuperWhisper voice model ID |
 | `SCRIBE_MODEL` | `scribe_v2_realtime` | Expected upstream realtime model |
+| `SCRIBE_VAD_TUNING` | `true` | Rewrite Scribe VAD query parameters for VAD commits |
+| `SCRIBE_VAD_SILENCE_THRESHOLD_SECS` | `1.5` | Silence before a VAD commit, `0.192`–`3.0` |
+| `SCRIBE_VAD_THRESHOLD` | `0.4` | Scribe speech-detection threshold, `0.1`–`0.9` |
+| `SCRIBE_MIN_SPEECH_DURATION_MS` | `100` | Minimum Scribe speech segment, `50`–`2000` |
+| `SCRIBE_MIN_SILENCE_DURATION_MS` | `100` | Minimum Scribe silence break, `50`–`2000` |
 | `SONIOX_MODEL` | `stt-async-v6` | Batch model |
 | `SONIOX_REALTIME_MODEL` | `stt-rt-v6` | Realtime model |
 | `SONIOX_ENDPOINT_DETECTION` | `true` | Soniox semantic endpointing; disabled automatically for diarization |
@@ -202,7 +207,7 @@ At `CloseStream`, the bridge uses Soniox's graceful empty-text finish and waits 
 | Choice | Gain | Cost or risk |
 | --- | --- | --- |
 | Endpoint detection on, conservative defaults | Final tokens sooner; shorter CloseStream tail | Soniox may finalize slightly earlier, with a small recognition-accuracy risk |
-| Endpoint level `2`, sensitivity `0.3`, max `1500` | Lowest endpoint latency | More segments and a larger accuracy risk; opt-in only |
+| Endpoint level `2`, sensitivity `0.3`, max `1500` | Lower endpoint latency than the defaults | More segments and a larger accuracy risk; opt-in only |
 | Endpoint off for diarization | Best diarization accuracy | No endpoint latency benefit |
 | Keepalive every 10 s | Survives pauses longer than Soniox's 20 s audio timeout | Billed stream duration continues while the pause lasts |
 | Prefix batch after a slow handshake | Prevents a large queued burst from leaving realtime permanently behind | Duplicate async cost for the queued prefix; measured 8 of 114 sessions before this tuning |
@@ -212,6 +217,16 @@ At `CloseStream`, the bridge uses Soniox's graceful empty-text finish and waits 
 
 Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/hour` async. The reliability fallbacks therefore add only a small premium when they trigger; they are retained because the app closes about 1.5 s after stop and a lost tail cannot be recovered later.
 
+### Fast auto profile
+
+`bash scripts/start-fast.sh` switches both **Soniox Target** and **Scribe Target** to `language=auto`, enables auto-paste, enables Scribe interception, and restarts the proxy with Soniox endpoint level `2`, sensitivity `0.3`, and max endpoint delay `1500 ms`. It also sets Scribe's VAD to `1.5 s` silence, threshold `0.4`, and `100 ms` minimum speech/silence. The script preserves each mode's other settings and updates an installed LaunchAgent plist so the profile survives login/reboot when that agent is used. A nohup-only setup applies until logout/reboot.
+
+This is Soniox's documented lower-latency recommendation. Soniox's generic default is `2000 ms`; the active profile deliberately uses the recommended `1500 ms`. Scribe's default VAD silence is also `1.5 s`, so both paths finalize after the same silence target. Level `2` / sensitivity `0.3` can still split at short pauses; raise the max delay, lower the level, or disable endpointing if accuracy drops.
+
+The first partial still arrives after about **1.4-2.1 s**. That floor is Soniox's WebSocket handshake plus model processing, not a proxy setting. Scribe is faster, but its Russian quality is lower. The fast profile only shortens finalization at pauses; it does not remove the first-partial floor.
+
+Health now reports the active endpoint and Scribe VAD settings. Revert automatic language with `LANGUAGE=ru PRESERVE_MODE=1 bash scripts/configure-superwhisper-mode.sh` for each mode. If a LaunchAgent is installed, the fast endpoint values are also persisted in its plist; reinstall the conservative agent with `bash scripts/install-launchd.sh`, or delete `SONIOX_ENDPOINT_DETECTION`, `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL`, `SONIOX_ENDPOINT_SENSITIVITY`, `SONIOX_MAX_ENDPOINT_DELAY_MS`, `SCRIBE_VAD_TUNING`, and the `SCRIBE_*_DURATION_MS` / `SCRIBE_VAD_*` entries from `~/Library/LaunchAgents/com.superwhisper.soniox-proxy.plist` before restarting it.
+
 If the Soniox WebSocket handshake takes longer than `SONIOX_PREFIX_BATCH_CONNECT_MS` (default 1200 ms), the audio queued during the handshake is transcribed with `stt-async-v6` instead of being burst into the realtime session. The realtime session then starts at the live edge. A burst would leave Soniox permanently behind live audio, and the app closes before the tail is finalized. The prefix tokens are prepended to the same transcript, with live token timestamps shifted by the prefix duration. Diagnostics record `prefix_batch_*` events and `prefix_missing_at_final` if the prefix is still pending at close.
 
 The bridge never sends a partial final. If Soniox is more than `SONIOX_RECONNECT_LAG_MS` behind live audio, it closes the current realtime session, opens a new one, and replays buffered audio from the last safely finalized token (`SONIOX_RECONNECT_OVERLAP_MS` overlap). At `CloseStream`, if the realtime session is still behind or does not finish within `SONIOX_CLOSE_BATCH_DELAY_MS`, the proxy transcribes the **entire recording** with `stt-async-v6` and keeps its side of the app socket open with empty interim `Results` for up to `SONIOX_CLOSE_RECOVERY_MS`. Only the full batch transcript is sent as the final segment. If recovery fails or times out, the proxy clears the live interim, closes with code `1011`, and the app can use its own retry/batch fallback instead of pasting truncated text. **Unverified:** whether SuperWhisper resets its ~1.5 s post-`CloseStream` timeout when it receives those empty interims is not yet proven with the real app. If it closes first, the proxy cannot deliver the recovered final; diagnostics record `client_closed_during_recovery` for that case.
@@ -219,6 +234,8 @@ The bridge never sends a partial final. If Soniox is more than `SONIOX_RECONNECT
 ## Scribe details
 
 When the active mode is **Scribe Target** (`sw-elevenlabs-scribe`), the app opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy forwards partial, committed, edited, and diagnostic messages unchanged.
+
+For `commit_strategy=vad`, the proxy also normalizes the four VAD query parameters to the shared profile (`vad_silence_threshold_secs=1.5`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, `min_silence_duration_ms=100`). It preserves the single-use token and every unknown parameter. Manual and turn-prediction strategies are not rewritten. Set `SCRIBE_VAD_TUNING=false` to forward the app's values unchanged.
 
 The proxy deliberately does not batch, buffer, or suppress Scribe messages. The app closes about 1.5 s after stop, before a batch final can arrive; a batch result also cannot reach a closed client. Suppressing upstream finals therefore lost text. Forwarding the upstream `committed_transcript` is the reliable path. The only queue is the short upstream WebSocket handshake; frames are forwarded immediately after it opens. The app's own Scribe final is the transcript; the proxy adds no synthetic final.
 

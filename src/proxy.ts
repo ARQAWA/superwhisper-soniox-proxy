@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import net from "node:net";
-import { dirname, extname } from "node:path";
+import { dirname, extname, resolve } from "node:path";
 import tls from "node:tls";
 import type { AppConfig } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -139,15 +139,21 @@ function appendCapture(config: AppConfig, record: CaptureRecord): void {
   writeFileSync(config.CAPTURE_PATH, JSON.stringify({ captures }, null, 2) + "\n", { mode: 0o600 });
 }
 
+export interface ProxyRuntime {
+  mitmEnabled: boolean;
+  instanceId: string;
+}
+
 export interface ProxyDeps {
   config: AppConfig;
   logger: Logger;
   soniox: SonioxService;
   diagnostics: Diagnostics;
+  runtime?: ProxyRuntime;
 }
 
 export function createRequestHandler(deps: ProxyDeps) {
-  const { config, logger, soniox, diagnostics } = deps;
+  const { config, logger, soniox, diagnostics, runtime } = deps;
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = randomUUID();
@@ -169,12 +175,29 @@ export function createRequestHandler(deps: ProxyDeps) {
         dry_run: config.DRY_RUN,
         target_host: config.TARGET_HOST,
         target_path: config.TARGET_PATH ?? null,
+        target_model: config.TARGET_MODEL,
+        target_voice_model_id: config.TARGET_VOICE_MODEL_ID,
+        target_realtime_query_models: config.TARGET_REALTIME_QUERY_MODELS,
         ws_mode: config.WS_MODE,
         soniox_realtime_model: config.SONIOX_REALTIME_MODEL,
+        soniox_endpoint_detection: config.SONIOX_ENDPOINT_DETECTION,
+        soniox_endpoint_sensitivity: config.SONIOX_ENDPOINT_SENSITIVITY,
+        soniox_endpoint_latency_adjustment_level: config.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+        soniox_max_endpoint_delay_ms: config.SONIOX_MAX_ENDPOINT_DELAY_MS,
+        soniox_keepalive_ms: config.SONIOX_KEEPALIVE_MS,
+        mitm_enabled: runtime?.mitmEnabled ?? false,
+        pid: process.pid,
+        entry_path: resolve(process.argv[1] ?? ""),
+        instance_id: runtime?.instanceId ?? "",
         scribe_enabled: config.SCRIBE_ENABLED,
         scribe_host: config.SCRIBE_HOST,
         scribe_model: config.SCRIBE_MODEL,
         scribe_voice_model_id: config.SCRIBE_VOICE_MODEL_ID,
+        scribe_vad_tuning: config.SCRIBE_VAD_TUNING,
+        scribe_vad_silence_threshold_secs: config.SCRIBE_VAD_SILENCE_THRESHOLD_SECS,
+        scribe_vad_threshold: config.SCRIBE_VAD_THRESHOLD,
+        scribe_min_speech_duration_ms: config.SCRIBE_MIN_SPEECH_DURATION_MS,
+        scribe_min_silence_duration_ms: config.SCRIBE_MIN_SILENCE_DURATION_MS,
         uptime_seconds: Math.round(process.uptime()),
         diagnostics_enabled: diagnostics.isEnabled,
         diagnostics_dir: diagnostics.dir,
@@ -441,7 +464,8 @@ export interface ProxyHandle {
 
 export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const { config, logger } = deps;
-  const handler = createRequestHandler(deps);
+  const runtime: ProxyRuntime = { mitmEnabled: false, instanceId: randomUUID() };
+  const handler = createRequestHandler({ ...deps, runtime });
   const servers: http.Server[] = [];
   const sockets = new Set<net.Socket>();
   const trackSocket = (socket: net.Socket): void => {
@@ -495,6 +519,7 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
       logger.warn({ error: err.message }, "MITM TLS client error (possible certificate pinning)");
       socket.destroy();
     });
+    runtime.mitmEnabled = true;
   } catch (err) {
     logger.warn(
       { error: errorLabel(err), cert_dir: config.CERT_DIR },

@@ -13,6 +13,11 @@ describe("Soniox realtime tuning", () => {
     expect(loaded.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL).toBe(0);
     expect(loaded.SONIOX_MAX_ENDPOINT_DELAY_MS).toBe(2000);
     expect(loaded.SONIOX_KEEPALIVE_MS).toBe(10000);
+    expect(loaded.SCRIBE_VAD_TUNING).toBe(true);
+    expect(loaded.SCRIBE_VAD_SILENCE_THRESHOLD_SECS).toBe(1.5);
+    expect(loaded.SCRIBE_VAD_THRESHOLD).toBe(0.4);
+    expect(loaded.SCRIBE_MIN_SPEECH_DURATION_MS).toBe(100);
+    expect(loaded.SCRIBE_MIN_SILENCE_DURATION_MS).toBe(100);
   });
 
   it("rejects an unrecognized boolean", () => {

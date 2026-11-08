@@ -64,9 +64,39 @@ function rawByteLength(data: WebSocket.RawData): number {
   return data.length;
 }
 
+function numericQueryParam(url: URL, key: string): number | null {
+  const raw = url.searchParams.get(key);
+  if (raw === null) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
+}
+
 export interface ScribeFrameSink {
   readyState: number;
   send(data: WebSocket.RawData, options: { binary: boolean }): void;
+}
+
+export interface ScribeVadTuning {
+  silenceThresholdSecs: number;
+  threshold: number;
+  minSpeechDurationMs: number;
+  minSilenceDurationMs: number;
+}
+
+/**
+ * Match Scribe's VAD endpointing to the selected Soniox endpoint profile.
+ * Only rewrite VAD-mode sockets: manual and turn-prediction commits do not use
+ * these parameters, and changing them there would alter unrelated semantics.
+ * The single-use token and every unknown query parameter are preserved.
+ */
+export function applyScribeVadTuning(url: URL, tuning: ScribeVadTuning): URL {
+  if (url.searchParams.get("commit_strategy") !== "vad") return new URL(url.toString());
+  const next = new URL(url.toString());
+  next.searchParams.set("vad_silence_threshold_secs", String(tuning.silenceThresholdSecs));
+  next.searchParams.set("vad_threshold", String(tuning.threshold));
+  next.searchParams.set("min_speech_duration_ms", String(tuning.minSpeechDurationMs));
+  next.searchParams.set("min_silence_duration_ms", String(tuning.minSilenceDurationMs));
+  return next;
 }
 
 export function forwardScribeFrame(
@@ -83,7 +113,17 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
   const requestId = randomUUID();
   const host = splitHostPort(String(req.headers.host ?? "")).hostname;
   const url = new URL(String(req.url ?? "/"), `https://${host}`);
-  const target = `wss://${host}${req.url ?? "/"}`;
+  const tunedUrl = config.SCRIBE_VAD_TUNING
+    ? applyScribeVadTuning(url, {
+        silenceThresholdSecs: config.SCRIBE_VAD_SILENCE_THRESHOLD_SECS,
+        threshold: config.SCRIBE_VAD_THRESHOLD,
+        minSpeechDurationMs: config.SCRIBE_MIN_SPEECH_DURATION_MS,
+        minSilenceDurationMs: config.SCRIBE_MIN_SILENCE_DURATION_MS,
+      })
+    : url;
+  const vadApplied =
+    config.SCRIBE_VAD_TUNING && url.searchParams.get("commit_strategy") === "vad";
+  const target = `wss://${host}${tunedUrl.pathname}${tunedUrl.search}`;
   const pending: ScribeFrame[] = [];
   let upstreamOpen = false;
 
@@ -104,6 +144,17 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
       model: url.searchParams.get("model_id"),
       config_model: config.SCRIBE_MODEL,
       mode: "scribe",
+      vad_tuning: vadApplied,
+      vad_silence_threshold_secs: vadApplied
+        ? numericQueryParam(tunedUrl, "vad_silence_threshold_secs")
+        : null,
+      vad_threshold: vadApplied ? numericQueryParam(tunedUrl, "vad_threshold") : null,
+      min_speech_duration_ms: vadApplied
+        ? numericQueryParam(tunedUrl, "min_speech_duration_ms")
+        : null,
+      min_silence_duration_ms: vadApplied
+        ? numericQueryParam(tunedUrl, "min_silence_duration_ms")
+        : null,
     },
     "scribe ws upstream connecting",
   );

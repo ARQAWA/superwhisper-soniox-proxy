@@ -115,13 +115,43 @@ Changes:
 
 Verification:
 
-- `pnpm test`: 27 passed; `pnpm build`: passed.
+- `pnpm test`: 29 passed; `pnpm build`: passed.
 - Short smoke: 85 chars / 11 words; long-with-2 s-pause smoke: 172 chars / 22 words; final length >= longest interim in both. The long smoke also requires a repeated normalized 6-word sequence and reports `repeated_phrase: true`, so both repetitions are present without printing transcript text.
 - The long trace records `endpoint_detection=true` and two `soniox_endpoint` events, so endpointing is active without changing the final text.
 - 22 s idle smoke with no app audio or app keepalive: two `keepalive_sent` events at 10.2 s and 10.0 s idle, then a complete 85-char / 11-word final. This proves the proxy keeps the Soniox stream alive past its 20 s audio timeout.
 - Close-to-finish in the three optimized smokes: 222 ms, 248 ms, and 203 ms; no batch recovery was needed.
 
 The defaults add no per-stream Soniox charge. The fallback cost remains opt-in by failure: before this tuning, diagnostics recorded prefix batches in 8 of 114 sessions and no full batch recoveries or reconnects. See the README tradeoff table for the cost/latency/accuracy alternatives.
+
+### Fast auto diagnosis (2026-11-09)
+
+The active mode was **Soniox Target** with `language=ru`. The realtime bridge was healthy, but Soniox's first result arrived after **1.4-2.1 s** in the last app sessions. The breakdown is roughly 0.7 s WebSocket connect plus model processing; the final itself took 0.2-0.3 s after `CloseStream`.
+
+An auto-language smoke (`language=auto`, language hints `ru,en`) produced the same 85 chars / 11 words, with the first result at **1.369 s**. Auto detection therefore does not remove the first-partial floor.
+
+A direct Soniox test with the undocumented `max_non_final_tokens_duration_ms=360` gained only about 0.1 s, and the installed SDK does not forward that field. It is not used.
+
+The selected recommendation profile is therefore:
+
+- Soniox Target with `language=auto`.
+- Endpoint level `2`, sensitivity `0.3`, max endpoint delay `1500 ms`.
+- Scribe Target with `language=auto` and matching VAD: `1.5 s` silence, threshold `0.4`, `100 ms` minimum speech/silence.
+- First partial still around 1.4-2.1 s; this is the Soniox floor.
+- Scribe is faster but has lower Russian quality.
+
+This is Soniox's documented lower-latency recommendation (`2` / `0.3` / `1500 ms`). Soniox's generic default is `2000 ms`; that is not the active profile. Level `2` / sensitivity `0.3` can split at short pauses and increase false endpoints. Raise the max delay or lower the level if Russian accuracy drops.
+
+`scripts/start-fast.sh` preserves both modes' other settings, applies the auto language and auto-paste, sets the shared endpoint profile, updates an installed LaunchAgent plist, and verifies `/__health` after restart.
+
+An earlier 6.2 s Scribe audio check saved a result, but it contained only the second test phrase and ran on a build before effective-value logging; it verifies forwarding only, not a long-pause close-tail. A later Scribe handshake with the final build logged the effective `vad_silence_threshold_secs=1.5`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, and `min_silence_duration_ms=100`, and the upstream socket opened; no audio was sent, so it verifies the query rewrite, not audio forwarding.
+
+Verification after hardening: the launcher reported `fast profile is active and verified`; `/__health` returned `ws_mode=soniox`, `dry_run=false`, target host `api.deepgram.com`, target path `/v1/listen`, target model `nova-3`, target voice model `sw-deepgram-nova-3`, realtime query models `nova-2,nova-3`, MITM `true`, endpoint detection `true`, level `2`, sensitivity `0.3`, max delay `1500`, Scribe interception `true`, and Scribe VAD `1.5` / `0.4` / `100` / `100`; the listener PID matched the running proxy in both nohup and loaded-agent checks; the auto smoke produced 85 chars / 11 words; the installed LaunchAgent plist contains the same endpoint and Scribe values and no API key; `pnpm test` passed 29 tests and `pnpm build` passed.
+
+### Auto-paste regression (2026-11-09)
+
+After the fast-profile update, SuperWhisper transcribed but did not insert text into the focused app. The active **Soniox Target** mode had `autoPaste=false`, which overrides the global auto-paste setting.
+
+The configurator now sets `autoPaste=true` when it creates or preserves Soniox Target, and `start-fast.sh` rejects the mode if auto-paste is not enabled. The current mode is `autoPaste=true`; the global `autoPasteEnabled` remains true. The user must confirm actual insertion in the focused app.
 
 ### Scribe recovery (2026-11-08)
 
@@ -131,7 +161,7 @@ The fix is live-only: the proxy forwards partial and committed transcript messag
 
 Verification:
 
-- `pnpm test`: 27 tests passed.
+- `pnpm test`: 29 tests passed.
 - `pnpm build`: passed.
 - Scribe close logs record code and reason byte length only; passthrough and Soniox close logs do the same.
 - Other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited while Scribe is active.

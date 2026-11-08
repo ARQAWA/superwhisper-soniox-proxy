@@ -55,9 +55,77 @@ proxy_pid() {
   fi
 }
 
+health_is_proxy() {
+  local pid="$1" health="$2" expected_instance="${3:-}"
+  # Accept a new proxy only when both identity fields are present. A legacy
+  # proxy has neither; a partial payload is not accepted.
+  if printf '%s' "$health" | jq -e 'has("pid") or has("entry_path")' >/dev/null 2>&1; then
+    printf '%s' "$health" | jq -e --arg pid "$pid" --arg entry "$ROOT/dist/src/index.js" --arg instance "$expected_instance" '
+      .pid == ($pid | tonumber)
+      and .entry_path == $entry
+      and (($instance == "") or (.instance_id == $instance))
+    ' >/dev/null 2>&1
+    return
+  fi
+
+  # Pre-change proxies have neither identity field. Accept only the process
+  # recorded in this installation's PID file, owning the IPv4 health listener,
+  # with the exact target fields. Never use this path for escalation.
+  [ -z "$expected_instance" ] || return 1
+  [ "$(proxy_pid)" = "$pid" ] || return 1
+  pid_owns_listener "$pid" || return 1
+  pid_cwd_is_root "$pid" || return 1
+  printf '%s' "$health" | jq -e '
+    .ok == true
+    and .target_host == "api.deepgram.com"
+    and .target_path == "/v1/listen"
+    and .ws_mode == "soniox"
+    and .soniox_realtime_model == "stt-rt-v6"
+  ' >/dev/null 2>&1
+}
+
 pid_is_proxy() {
+  local pid="${1:-}" expected_instance="${2:-}" health
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  health="$(proxy_health_json)" || return 1
+  health_is_proxy "$pid" "$health" "$expected_instance"
+}
+
+pid_owns_listener() {
   local pid="${1:-}"
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && ps -p "$pid" -o command= 2>/dev/null | grep -q 'dist/src/index.js'
+  [ -n "$pid" ] && lsof -nP -iTCP@"$PROXY_HOST":"$PROXY_PORT" -sTCP:LISTEN -t 2>/dev/null | grep -qx "$pid"
+}
+
+pid_cwd_is_root() {
+  local pid="${1:-}" cwd
+  cwd="$(lsof -a -p "$pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -n 1)"
+  [ "$cwd" = "$ROOT" ]
+}
+
+plist_targets_this_install() {
+  [ -f "$LAUNCHD_PLIST" ] || return 1
+  # The template has no separate Program; launchd execs ProgramArguments[0].
+  # Reject a Program override and validate the effective executable and entry.
+  if /usr/libexec/PlistBuddy -c 'Print :Program' "$LAUNCHD_PLIST" >/dev/null 2>&1; then
+    return 1
+  fi
+  local executable entry
+  executable="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:0' "$LAUNCHD_PLIST" 2>/dev/null || true)"
+  entry="$(/usr/libexec/PlistBuddy -c 'Print :ProgramArguments:1' "$LAUNCHD_PLIST" 2>/dev/null || true)"
+  [ "$(basename "$executable")" = "node" ] || return 1
+  [ "$entry" = "$ROOT/dist/src/index.js" ]
+}
+
+launchctl_service_is_this_install() {
+  local program args executable entry
+  program="$(launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null | sed -n 's/^[[:space:]]*program = //p' | head -n 1)"
+  args="$(launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" 2>/dev/null | sed -n '/arguments = {/,/}/p')"
+  args="$(printf '%s\n' "$args" | sed '1d;$d' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  executable="$(printf '%s\n' "$args" | sed -n '1p')"
+  entry="$(printf '%s\n' "$args" | sed -n '2p')"
+  [ "$(basename "$program")" = "node" ] || return 1
+  [ "$(basename "$executable")" = "node" ] || return 1
+  [ "$entry" = "$ROOT/dist/src/index.js" ]
 }
 
 keychain_key_present() {

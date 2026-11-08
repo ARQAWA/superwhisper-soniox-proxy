@@ -5,6 +5,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 require_cmd node
+require_cmd jq
 mkdir -p "$LOG_DIR"
 
 if proxy_healthy; then
@@ -29,10 +30,10 @@ fi
 # Set KEEP_ENV_KEY=1 if you intentionally use an environment-provided key.
 if [ "${KEEP_ENV_KEY:-0}" = "1" ]; then
   nohup env WS_MODE="${WS_MODE:-soniox}" DRY_RUN="${DRY_RUN:-false}" LOG_LEVEL="${LOG_LEVEL:-info}" \
-    node dist/src/index.js >>"$LOG_DIR/proxy.stdout.log" 2>&1 &
+    node "$ROOT/dist/src/index.js" >>"$LOG_DIR/proxy.stdout.log" 2>&1 &
 else
   nohup env -u SONIOX_API_KEY WS_MODE="${WS_MODE:-soniox}" DRY_RUN="${DRY_RUN:-false}" LOG_LEVEL="${LOG_LEVEL:-info}" \
-    node dist/src/index.js >>"$LOG_DIR/proxy.stdout.log" 2>&1 &
+    node "$ROOT/dist/src/index.js" >>"$LOG_DIR/proxy.stdout.log" 2>&1 &
 fi
 echo "$!" >"$PID_FILE"
 
