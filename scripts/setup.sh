@@ -72,6 +72,10 @@ if [ ! -f "$CA_CRT" ] || [ ! -f "$LEAF_CRT" ] || [ ! -f "$CERT_DIR/leaf.key" ]; 
   (cd "$ROOT" && bash scripts/gen-certs.sh)
 else
   printf '  using existing %s\n' "$CA_CRT"
+  if ! openssl x509 -in "$LEAF_CRT" -noout -ext subjectAltName 2>/dev/null | grep -q "api.elevenlabs.io"; then
+    printf '  leaf certificate lacks api.elevenlabs.io; renewing\n'
+    (cd "$ROOT" && bash scripts/gen-certs.sh)
+  fi
   days="$(ca_days_left)"
   if [ "$days" != "unknown" ] && [ "$days" -lt 7 ]; then
     printf '  CA expires in %s days; renewing certificates\n' "$days"

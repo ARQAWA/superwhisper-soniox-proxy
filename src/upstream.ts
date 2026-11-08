@@ -1,6 +1,6 @@
 import { resolve4, resolve6 } from "node:dns/promises";
 import https from "node:https";
-import type { IncomingHttpHeaders } from "node:http";
+import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import type { UpstreamResponse } from "./types.js";
 
@@ -71,20 +71,31 @@ function lookupBypassingHosts(
     .catch((err: Error) => callback(err, undefined, undefined));
 }
 
-function cleanRequestHeaders(headers: IncomingHttpHeaders, hostname: string, body: Buffer): Record<string, string | string[]> {
+export function cleanRequestHeaders(
+  headers: IncomingHttpHeaders,
+  hostname: string,
+  body: Buffer,
+  streaming = false,
+): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = {};
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
     if (value === undefined) continue;
-    if (HOP_BY_HOP.has(lower)) continue;
-    if (lower === "accept-encoding") continue;
+    if (HOP_BY_HOP.has(lower)) {
+      if (streaming && (lower === "transfer-encoding" || lower === "trailer")) out[lower] = value;
+      continue;
+    }
+    if (lower === "accept-encoding" && !streaming) continue;
     if (lower === "host") continue;
-    if (lower === "content-length") continue;
+    if (lower === "content-length" && !streaming) continue;
     if (lower === "expect") continue;
     out[key] = value;
   }
   out.host = hostname;
-  if (body.length > 0 || !["GET", "HEAD", "DELETE", "OPTIONS"].includes((headers[":method"] as string) ?? "")) {
+  if (streaming) {
+    const contentLength = headers["content-length"];
+    if (typeof contentLength === "string") out["content-length"] = contentLength;
+  } else if (body.length > 0 || !["GET", "HEAD", "DELETE", "OPTIONS"].includes((headers[":method"] as string) ?? "")) {
     out["content-length"] = String(body.length);
   }
   return out;
@@ -100,6 +111,23 @@ function cleanResponseHeaders(headers: IncomingHttpHeaders): Record<string, stri
     if (lower === "content-length") continue;
     out[key] = value;
   }
+  return out;
+}
+
+export function cleanStreamingResponseHeaders(
+  headers: IncomingHttpHeaders,
+): Record<string, string | string[]> {
+  const out: Record<string, string | string[]> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    if (value === undefined) continue;
+    if (HOP_BY_HOP.has(lower) && lower !== "trailer" && lower !== "transfer-encoding") continue;
+    out[key] = value;
+  }
+  const transferEncoding = out["transfer-encoding"];
+  const transferValue = Array.isArray(transferEncoding) ? transferEncoding.join(", ") : transferEncoding;
+  const hasChunked = typeof transferValue === "string" && /(?:^|,)\s*chunked\s*$/i.test(transferValue);
+  if (typeof out["content-length"] !== "string" && !hasChunked) out.connection = "close";
   return out;
 }
 
@@ -123,7 +151,79 @@ export interface ForwardRequest {
   path: string;
   headers: IncomingHttpHeaders;
   body: Buffer;
+  bodyStream?: IncomingMessage;
   timeoutMs: number;
+}
+
+export interface StreamingForwardResult {
+  status: number;
+  bytes: number;
+}
+
+export async function forwardStreamingRequest(
+  req: ForwardRequest,
+  res: ServerResponse,
+): Promise<StreamingForwardResult> {
+  return new Promise<StreamingForwardResult>((resolve, reject) => {
+    let responseStream: IncomingMessage | null = null;
+    const request = https.request(
+      {
+        hostname: req.hostname,
+        port: req.port,
+        method: req.method,
+        path: req.path,
+        headers: cleanRequestHeaders(req.headers, req.hostname, req.body, true),
+        servername: req.hostname,
+        rejectUnauthorized: true,
+        lookup: lookupBypassingHosts as never,
+        timeout: req.timeoutMs,
+      },
+      (response) => {
+        responseStream = response;
+        const status = response.statusCode ?? 502;
+        const headers = cleanStreamingResponseHeaders(response.headers);
+        if (headers.connection === "close") res.shouldKeepAlive = false;
+        res.writeHead(status, headers);
+        let bytes = 0;
+        response.on("data", (chunk: Buffer) => {
+          bytes += chunk.length;
+          if (!res.write(chunk)) response.pause();
+        });
+        res.on("drain", () => response.resume());
+        response.on("end", () => {
+          if (Object.keys(response.trailers).length > 0) res.addTrailers(response.trailers);
+          res.end();
+          resolve({ status, bytes });
+        });
+        response.on("error", reject);
+      },
+    );
+
+    res.on("close", () => {
+      request.destroy();
+      responseStream?.destroy();
+    });
+    request.on("timeout", () => {
+      request.destroy(new Error(`upstream timeout after ${req.timeoutMs}ms`));
+    });
+    request.on("error", (err) => {
+      if (res.headersSent) res.destroy(err);
+      else reject(err);
+    });
+    if (req.bodyStream) {
+      req.bodyStream.on("error", (err) => request.destroy(err));
+      req.bodyStream.pipe(request, { end: false });
+      req.bodyStream.on("end", () => {
+        if (Object.keys(req.bodyStream?.trailers ?? {}).length > 0) {
+          request.addTrailers(req.bodyStream?.trailers ?? {});
+        }
+        request.end();
+      });
+    } else {
+      if (req.body.length > 0) request.write(req.body);
+      request.end();
+    }
+  });
 }
 
 export async function forwardRequest(req: ForwardRequest): Promise<UpstreamResponse> {

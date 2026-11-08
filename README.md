@@ -6,6 +6,7 @@ A local TypeScript proxy that lets **SuperWhisper 3.2.1** use **Soniox STT v6** 
 
 - **Batch** (`POST https://api.deepgram.com/v1/listen`, `model=nova-3`) is answered by Soniox `stt-async-v6` with a Deepgram-shaped JSON response.
 - **Realtime** (`wss://api.deepgram.com/v1/listen`, the app sends `model=nova-2` for Nova 3 modes) is bridged to Soniox `stt-rt-v6` and streamed back as Deepgram `Results` messages.
+- **Scribe** (`wss://api.elevenlabs.io/v1/speech-to-text/realtime`, the app's `sw-elevenlabs-scribe` mode) is forwarded live. Every partial and `committed_transcript` is relayed without batch buffering or suppression, so the app receives the final before its own close timeout.
 - **Pass-through** for every other host, path, and model is unchanged. `api.superwhisper.com` model/license traffic and non-target Deepgram models still work.
 - Target audio is **never forwarded to Deepgram**. Logs record `upstream_forwarded=false` for intercepted requests.
 - The proxy listens on loopback only (`127.0.0.1:8443` and `[::1]:8443`).
@@ -19,6 +20,7 @@ SuperWhisper
 local proxy (Node/TypeScript)
    ├─ batch  /v1/listen + model=nova-3              → Soniox stt-async-v6
    ├─ realtime /v1/listen (WS, target mode)         → Soniox stt-rt-v6
+   ├─ realtime /v1/speech-to-text/realtime         → ElevenLabs Scribe (live)
    └─ everything else                               → real upstream over TLS
 ```
 
@@ -96,6 +98,8 @@ SMOKE_LONG=1 node scripts/smoke-realtime.mjs  # adds a 2 s pause; 171 chars / 22
 pnpm test                         # unit tests
 ```
 
+Scribe is checked through the app: select **Scribe Target**, dictate at least 30 seconds in a quiet room, then compare the saved transcript with the spoken text. The proxy must log `scribe ws upstream open` and relay the final `committed_transcript`; it must not buffer or synthesize finals, and it must not log transcript text.
+
 `scripts/smoke-realtime.mjs` prints only lengths, word counts, and message counts. It never prints transcript text.
 
 ## Diagnostics
@@ -140,6 +144,11 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `WS_MODE` | `soniox` | `soniox` or `passthrough` |
 | `ALLOW_TARGET_WS_PASSTHROUGH` | `false` | Safety gate; keep false |
 | `WS_CLOSE_DELAY_MS` | `350` | Delay before the bridge closes the socket after the final result |
+| `SCRIBE_ENABLED` | `true` | Intercept the Scribe realtime socket for the active Scribe mode |
+| `SCRIBE_HOST` | `api.elevenlabs.io` | Scribe upstream host |
+| `SCRIBE_PATH` | `/v1/speech-to-text/realtime` | Scribe realtime path |
+| `SCRIBE_VOICE_MODEL_ID` | `sw-elevenlabs-scribe` | SuperWhisper voice model ID |
+| `SCRIBE_MODEL` | `scribe_v2_realtime` | Expected upstream realtime model |
 | `SONIOX_MODEL` | `stt-async-v6` | Batch model |
 | `SONIOX_REALTIME_MODEL` | `stt-rt-v6` | Realtime model |
 | `SONIOX_PREFIX_BATCH_CONNECT_MS` | `1200` | If Soniox connects slower, send queued audio through batch instead of a burst (`0` disables) |
@@ -182,6 +191,16 @@ Endpoint detection is disabled so a long dictation is not chopped into tiny fina
 If the Soniox WebSocket handshake takes longer than `SONIOX_PREFIX_BATCH_CONNECT_MS` (default 1200 ms), the audio queued during the handshake is transcribed with `stt-async-v6` instead of being burst into the realtime session. The realtime session then starts at the live edge. A burst would leave Soniox permanently behind live audio, and the app closes before the tail is finalized. The prefix tokens are prepended to the same transcript, with live token timestamps shifted by the prefix duration. Diagnostics record `prefix_batch_*` events and `prefix_missing_at_final` if the prefix is still pending at close.
 
 The bridge never sends a partial final. If Soniox is more than `SONIOX_RECONNECT_LAG_MS` behind live audio, it closes the current realtime session, opens a new one, and replays buffered audio from the last safely finalized token (`SONIOX_RECONNECT_OVERLAP_MS` overlap). At `CloseStream`, if the realtime session is still behind or does not finish within `SONIOX_CLOSE_BATCH_DELAY_MS`, the proxy transcribes the **entire recording** with `stt-async-v6` and keeps its side of the app socket open with empty interim `Results` for up to `SONIOX_CLOSE_RECOVERY_MS`. Only the full batch transcript is sent as the final segment. If recovery fails or times out, the proxy clears the live interim, closes with code `1011`, and the app can use its own retry/batch fallback instead of pasting truncated text. **Unverified:** whether SuperWhisper resets its ~1.5 s post-`CloseStream` timeout when it receives those empty interims is not yet proven with the real app. If it closes first, the proxy cannot deliver the recovered final; diagnostics record `client_closed_during_recovery` for that case.
+
+## Scribe details
+
+When the active mode is **Scribe Target** (`sw-elevenlabs-scribe`), the app opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy forwards partial, committed, edited, and diagnostic messages unchanged.
+
+The proxy deliberately does not batch, buffer, or suppress Scribe messages. The app closes about 1.5 s after stop, before a batch final can arrive; a batch result also cannot reach a closed client. Suppressing upstream finals therefore lost text. Forwarding the upstream `committed_transcript` is the reliable path. The only queue is the short upstream WebSocket handshake; frames are forwarded immediately after it opens. The app's own Scribe final is the transcript; the proxy adds no synthetic final.
+
+While Scribe is active, other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited.
+
+A 42 s Russian smoke test delivered the final sentence before the app closed. The microphone also transcribed a nearby voice message, so final checks must run in a quiet room. Live text is never written to logs.
 
 ## Security and privacy
 

@@ -11,10 +11,10 @@ import { errorPayload, readRequestBody, sendJson, sendUpstreamResponse, upstream
 import type { Logger } from "./logger.js";
 import { parseMultipart } from "./multipart.js";
 import { SonioxService } from "./soniox.js";
-import { attachWebSocketHandler } from "./realtime.js";
+import { attachWebSocketHandler, isScribeModeActive } from "./realtime.js";
 import { describeSchema, loadTemplate, renderDeepgramLikeResponse, sanitizeForTemplate } from "./template.js";
 import type { ParsedMultipart, RequestMeta, RequestSummary } from "./types.js";
-import { forwardRequest, resolveRealHost } from "./upstream.js";
+import { forwardRequest, forwardStreamingRequest, resolveRealHost } from "./upstream.js";
 import { redactQuery } from "./url-utils.js";
 
 interface CaptureRecord {
@@ -162,7 +162,8 @@ export function createRequestHandler(deps: ProxyDeps) {
     const contentType = String(req.headers["content-type"] ?? "");
     const contentLength = Number(req.headers["content-length"] ?? 0);
 
-    if (path === "/__health" && (req.method === "GET" || req.method === "HEAD")) {
+    const localHealthHost = host === "127.0.0.1" || host === "::1" || host === "localhost";
+    if (localHealthHost && path === "/__health" && (req.method === "GET" || req.method === "HEAD")) {
       sendJson(res, 200, {
         ok: true,
         dry_run: config.DRY_RUN,
@@ -170,10 +171,66 @@ export function createRequestHandler(deps: ProxyDeps) {
         target_path: config.TARGET_PATH ?? null,
         ws_mode: config.WS_MODE,
         soniox_realtime_model: config.SONIOX_REALTIME_MODEL,
+        scribe_enabled: config.SCRIBE_ENABLED,
+        scribe_host: config.SCRIBE_HOST,
+        scribe_model: config.SCRIBE_MODEL,
+        scribe_voice_model_id: config.SCRIBE_VOICE_MODEL_ID,
         uptime_seconds: Math.round(process.uptime()),
         diagnostics_enabled: diagnostics.isEnabled,
         diagnostics_dir: diagnostics.dir,
       });
+      return;
+    }
+
+    if (host === config.SCRIBE_HOST) {
+      try {
+        const streamed = await forwardStreamingRequest(
+          {
+            hostname: host,
+            port: 443,
+            method: req.method ?? "GET",
+            path: rawUrl.startsWith("http") ? url.pathname + url.search : rawUrl,
+            headers: req.headers,
+            body: Buffer.alloc(0),
+            bodyStream: req,
+            timeoutMs: config.UPSTREAM_TIMEOUT_MS,
+          },
+          res,
+        );
+        logger.info(
+          {
+            request_id: requestId,
+            status: streamed.status,
+            response_bytes: streamed.bytes,
+            streaming: true,
+            upstream_forwarded: true,
+            latency_ms: Date.now() - started,
+          },
+          "proxy response (streaming pass-through)",
+        );
+      } catch (err) {
+        const status = upstreamErrorStatus(err);
+        logger.error(
+          {
+            request_id: requestId,
+            status,
+            streaming: true,
+            upstream_forwarded: false,
+            latency_ms: Date.now() - started,
+            error: errorLabel(err),
+          },
+          "streaming upstream request failed",
+        );
+        diagnostics.recordError("upstream_stream", err, {
+          request_id: requestId,
+          host,
+          path,
+          status,
+          latency_ms: Date.now() - started,
+        });
+        if (res.headersSent) res.destroy(err instanceof Error ? err : undefined);
+        else sendJson(res, status, errorPayload(err instanceof Error ? err.message : "upstream error", "upstream_error"));
+      }
       return;
     }
 
@@ -448,7 +505,9 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const onConnect = (req: IncomingMessage, clientSocket: net.Socket, head: Buffer): void => {
     trackSocket(clientSocket);
     const { hostname, port } = splitHostPort(req.url ?? "");
-    if (hostname === config.TARGET_HOST && tlsServer) {
+    const scribeMitm =
+      config.SCRIBE_ENABLED && hostname === config.SCRIBE_HOST && isScribeModeActive(config);
+    if ((hostname === config.TARGET_HOST || scribeMitm) && tlsServer) {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) clientSocket.unshift(head);
       tlsServer.emit("connection", clientSocket);

@@ -12,6 +12,7 @@ import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
 import { SonioxService } from "./soniox.js";
+import { scribeWebSocket } from "./scribe.js";
 import { mergeTokensToWords, tokensToText } from "./tokens.js";
 import type { ParsedFile } from "./types.js";
 import { redactQuery } from "./url-utils.js";
@@ -107,6 +108,16 @@ function rawByteLength(data: WebSocket.RawData): number {
   return data.length;
 }
 
+export function safeWebSocketCloseCode(code: number): number {
+  if (
+    (code >= 1000 && code <= 1014 && code !== 1004 && code !== 1005 && code !== 1006) ||
+    (code >= 3000 && code <= 4999)
+  ) {
+    return code;
+  }
+  return 1011;
+}
+
 function logClientFrame(logger: Logger, requestId: string, data: WebSocket.RawData, isBinary: boolean, model: string | null): void {
   if (isBinary) {
     logger.debug({ request_id: requestId, model, kind: "binary", bytes: rawByteLength(data) }, "ws client frame");
@@ -166,7 +177,7 @@ function passthroughWebSocket(req: IncomingMessage, client: WebSocket, deps: WsD
     else pending.push({ data, isBinary });
   });
   client.on("close", (code, reason) => {
-    logger.info({ request_id: requestId, code, reason: reason.toString(), model }, "ws client closed");
+    logger.info({ request_id: requestId, code, reason_bytes: reason.length, model }, "ws client closed");
     upstream.close();
   });
   client.on("error", (err) => logger.warn({ request_id: requestId, error: errorLabel(err) }, "ws client error"));
@@ -182,8 +193,8 @@ function passthroughWebSocket(req: IncomingMessage, client: WebSocket, deps: WsD
     if (client.readyState === WebSocket.OPEN) client.send(data, { binary: isBinary });
   });
   upstream.on("close", (code, reason) => {
-    logger.info({ request_id: requestId, code, reason: reason.toString(), model }, "ws upstream closed");
-    if (client.readyState === WebSocket.OPEN) client.close(code, reason);
+    logger.info({ request_id: requestId, code, reason_bytes: reason.length, model }, "ws upstream closed");
+    if (client.readyState === WebSocket.OPEN) client.close(safeWebSocketCloseCode(code), reason);
   });
   upstream.on("error", (err) => {
     logger.warn({ request_id: requestId, error: errorLabel(err), model }, "ws upstream error");
@@ -1303,7 +1314,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
       tailTokens: tailTokens.length,
     });
     diag.end(terminalStatus ?? undefined);
-    logger.info({ request_id: requestId, code, reason: reason.toString() }, "ws soniox client closed");
+    logger.info({ request_id: requestId, code, reason_bytes: reason.length }, "ws soniox client closed");
     clearTimeout(closeDeadlineTimer);
     clearTimeout(recoveryTimer);
     if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
@@ -1324,11 +1335,18 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   });
 }
 
-let targetModeCache: { at: number; value: boolean } = { at: 0, value: false };
+let activeModeCache: { at: number; modeKey: string; voiceModelId: string | null } = {
+  at: 0,
+  modeKey: "",
+  voiceModelId: null,
+};
 
-function activeModeUsesTargetVoiceModel(config: AppConfig): boolean {
-  if (Date.now() - targetModeCache.at < 1000) return targetModeCache.value;
+export function activeModeVoiceModelId(config: AppConfig): string | null {
   let modeKey = config.TARGET_MODE_KEY;
+  const now = Date.now();
+  if (now - activeModeCache.at < 1000 && activeModeCache.modeKey === modeKey) {
+    return activeModeCache.voiceModelId;
+  }
   try {
     const out = execFileSync("/usr/bin/defaults", ["read", "com.superduper.superwhisper", "activeModeKey"], {
       encoding: "utf8",
@@ -1339,16 +1357,28 @@ function activeModeUsesTargetVoiceModel(config: AppConfig): boolean {
   } catch {
     // fall back to configured mode key
   }
-  let value = false;
+  let voiceModelId: string | null = null;
   try {
     const modePath = join(homedir(), "Documents", "superwhisper", "modes", `${modeKey}.json`);
     const mode = JSON.parse(readFileSync(modePath, "utf8")) as { voiceModelID?: string };
-    value = mode.voiceModelID === config.TARGET_VOICE_MODEL_ID;
+    voiceModelId = mode.voiceModelID ?? null;
   } catch {
-    value = false;
+    voiceModelId = null;
   }
-  targetModeCache = { at: Date.now(), value };
-  return value;
+  activeModeCache = { at: Date.now(), modeKey, voiceModelId };
+  return voiceModelId;
+}
+
+export function activeModeUsesVoiceModel(config: AppConfig, voiceModelId: string): boolean {
+  return activeModeVoiceModelId(config) === voiceModelId;
+}
+
+function activeModeUsesTargetVoiceModel(config: AppConfig): boolean {
+  return activeModeUsesVoiceModel(config, config.TARGET_VOICE_MODEL_ID);
+}
+
+export function isScribeModeActive(config: AppConfig): boolean {
+  return config.SCRIBE_ENABLED && activeModeUsesVoiceModel(config, config.SCRIBE_VOICE_MODEL_ID);
 }
 
 export function isTargetRealtimeRequest(config: AppConfig, model: string | null): boolean {
@@ -1367,6 +1397,17 @@ export function attachWebSocketHandler(server: import("node:http").Server, deps:
     const url = new URL(String(req.url ?? "/"), `https://${host}`);
     const model = url.searchParams.get("model");
     const isTarget = host === config.TARGET_HOST && isTargetRealtimeRequest(config, model);
+    const isScribe =
+      config.SCRIBE_ENABLED &&
+      config.WS_MODE !== "passthrough" &&
+      host === config.SCRIBE_HOST &&
+      url.pathname === config.SCRIBE_PATH &&
+      activeModeUsesVoiceModel(config, config.SCRIBE_VOICE_MODEL_ID);
+
+    if (isScribe) {
+      wss.handleUpgrade(req, socket, head, (client) => scribeWebSocket(req, client, deps));
+      return;
+    }
 
     if (isTarget && config.WS_MODE === "passthrough" && !config.ALLOW_TARGET_WS_PASSTHROUGH) {
       logger.warn({ host, path: url.pathname, model }, "refusing to pass target realtime audio to upstream");

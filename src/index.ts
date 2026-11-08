@@ -16,6 +16,8 @@ async function main(): Promise<void> {
       target_path: config.TARGET_PATH ?? null,
       target_model: config.TARGET_MODEL,
       soniox_model: config.SONIOX_MODEL,
+      scribe_enabled: config.SCRIBE_ENABLED,
+      scribe_voice_model_id: config.SCRIBE_VOICE_MODEL_ID,
       port: config.PROXY_PORT,
       diagnostics_enabled: diagnostics.isEnabled,
       diagnostics_dir: diagnostics.dir,

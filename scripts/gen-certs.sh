@@ -48,7 +48,8 @@ subjectAltName = @alt
 [alt]
 DNS.1 = api.deepgram.com
 DNS.2 = api.superwhisper.com
-DNS.3 = localhost
+DNS.3 = api.elevenlabs.io
+DNS.4 = localhost
 IP.1 = 127.0.0.1
 IP.2 = ::1
 CNF

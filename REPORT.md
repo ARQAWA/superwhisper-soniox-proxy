@@ -102,6 +102,21 @@ Verification:
 - Real 21.2 s recording sent faster than real time: realtime lagged, batch recovery returned a 343-character final after 8.1 s, with 11 empty interims sent to a **synthetic WebSocket client**. This proves the proxy side of the hold-open; it does not prove that SuperWhisper resets its own ~1.5 s timeout. No real-app hold-open test has been recorded yet. If SuperWhisper closes first, the proxy cannot deliver a batch final or a `1011`; diagnostics record `client_closed_during_recovery`.
 - The deployed proxy was restarted and its health endpoint reports `ws_mode=soniox`.
 
+### Scribe recovery (2026-11-08)
+
+SuperWhisper's **Scribe Target** mode uses `sw-elevenlabs-scribe` and opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy's first recovery version buffered PCM and suppressed upstream `committed_transcript` messages. That was unsafe for this app: it has no `xi-api-key` or `Authorization` header, so the batch request returned HTTP 401 with `invalid_api_key`, and the app closed its socket about 1.5 s after stop, before a batch final could arrive. The saved transcript lost its tail.
+
+The fix is live-only: the proxy forwards partial and committed transcript messages unchanged, including the final `committed_transcript`, and never batches or synthesizes a final. The only queue is the short upstream WebSocket handshake. A batch was tested and rejected because the app closes about 1.5 s after stop; the batch returned HTTP 401 without an `xi-api-key`, and even a slow successful batch cannot reach a closed socket. The app's own query-token flow is the only reliable path.
+
+Verification:
+
+- `pnpm test`: 24 tests passed.
+- `pnpm build`: passed.
+- Scribe close logs record code and reason byte length only; passthrough and Soniox close logs do the same.
+- Other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited while Scribe is active.
+- 42.2 s synthetic Russian dictation through the real app and Scribe Target: the final sentence **Финальная проверка хвоста прошла успешно** was present in the saved transcript. A nearby voice message was also captured by the microphone and appended after it; the ambient audio is expected microphone pickup, not a proxy duplication.
+- The proxy log for the run no longer reports batch recovery; it logs `scribe ws upstream open`, forwards the final, and does not log transcript text.
+
 ### Pass-through
 
 - Raw CONNECT to `example.com`: HTTP 200.
