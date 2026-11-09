@@ -21,9 +21,10 @@ The installer will:
 5. Create a local CA and leaf certificate for the MITM.
 6. Trust the CA for your user (macOS may ask for confirmation).
 7. Build and start the proxy as a **LaunchAgent**.
-8. Point the **Wi-Fi secure web proxy** at `127.0.0.1:8443`.
+8. Point the Wi-Fi proxy at a generated **PAC file** on `127.0.0.1:8443`.
+   Only the SuperWhisper, Scribe, ElevenLabs, and Soniox hosts use the proxy.
 9. Create missing **Soniox Target** and **Scribe Target** modes.
-10. Apply the `0.5 s` Scribe VAD profile.
+10. Apply the quality profile: Soniox provider defaults and a `1 s` Scribe VAD.
 
 Existing modes, their selected languages and audio sources, the active selection, and existing Soniox LaunchAgent settings are preserved. After installation, select the target mode you want in SuperWhisper.
 
@@ -67,10 +68,10 @@ The installer can install Node, pnpm, and jq through Homebrew. If Homebrew is no
 | Local CA/leaf in `certs/` | `scripts/teardown.sh --remove-certs` |
 | CA trust in the login keychain | `scripts/teardown.sh` |
 | LaunchAgent `com.superwhisper.soniox-proxy` | `scripts/teardown.sh` |
-| Wi-Fi secure web proxy `127.0.0.1:8443` | `scripts/teardown.sh` |
+| Wi-Fi PAC proxy `127.0.0.1:8443` | `scripts/teardown.sh` |
 | SuperWhisper mode `soniox-target` and active mode key | Remove the mode in SuperWhisper / use another mode |
 
-The CA is local-only. Soniox target audio goes to Soniox, and Scribe target audio goes to ElevenLabs. Non-target traffic passes through to its real upstream.
+The CA is local-only. Soniox target audio goes to Soniox, and Scribe target audio goes to ElevenLabs. The PAC file routes only the allowlisted hosts through the proxy; every other host stays direct.
 
 ## Verify
 
@@ -95,7 +96,7 @@ The upgrade path preserves user changes:
 3. Installs locked dependencies and stages a fresh `dist/` build.
 4. Reuses valid certificates and verifies the actual trust chain.
 5. Renews an expired, expiring, invalid, or mismatched certificate when needed.
-6. Starts the owned proxy and applies the `0.5 s` Scribe profile.
+6. Starts the owned proxy and applies the quality profile.
 7. Preserves existing modes, the active mode, and Soniox LaunchAgent settings.
 
 If the checkout has local changes or divergent history, stop and ask the user before resolving them. Do not use `git reset --hard` or forced checkout. The installer keeps the Soniox key, diagnostic traces, SuperWhisper recordings, and unrelated LaunchAgents.

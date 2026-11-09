@@ -39,7 +39,7 @@ else
   printf '  left LaunchAgent and plist untouched because the stop refused or failed\n'
 fi
 
-printf 'restoring macOS secure web proxy\n'
+printf 'restoring macOS proxy\n'
 if [ -f "$STATE_FILE" ]; then
   state_raw() {
     sed -n "s/^$1=//p" "$STATE_FILE" | head -n 1
@@ -61,24 +61,37 @@ if [ -f "$STATE_FILE" ]; then
   stored_enabled="$(state_read PREVIOUS_ENABLED)"
   stored_server="$(state_read PREVIOUS_SERVER)"
   stored_port="$(state_read PREVIOUS_PORT)"
+  stored_auto_enabled="$(state_read PREVIOUS_AUTO_ENABLED)"
+  stored_auto_url="$(state_read PREVIOUS_AUTO_URL)"
   if [ -n "$stored_service" ]; then
     NETWORK_SERVICE="$stored_service"
   fi
   PREVIOUS_ENABLED="${stored_enabled:-No}"
   PREVIOUS_SERVER="$stored_server"
   PREVIOUS_PORT="${stored_port:-0}"
+  PREVIOUS_AUTO_ENABLED="${stored_auto_enabled:-No}"
+  PREVIOUS_AUTO_URL="$stored_auto_url"
   if [ "${PREVIOUS_ENABLED:-No}" = "Yes" ] && [ -n "${PREVIOUS_SERVER:-}" ] && [ "${PREVIOUS_PORT:-0}" != "0" ]; then
     networksetup -setsecurewebproxy "$NETWORK_SERVICE" "$PREVIOUS_SERVER" "$PREVIOUS_PORT"
     networksetup -setsecurewebproxystate "$NETWORK_SERVICE" on
     printf '  restored previous proxy %s:%s\n' "$PREVIOUS_SERVER" "$PREVIOUS_PORT"
   else
     networksetup -setsecurewebproxystate "$NETWORK_SERVICE" off
-    printf '  disabled secure web proxy\n'
+    printf '  disabled secure web and PAC proxies\n'
+  fi
+  if [ "${PREVIOUS_AUTO_ENABLED:-No}" = "Yes" ] && [ -n "${PREVIOUS_AUTO_URL:-}" ]; then
+    networksetup -setautoproxyurl "$NETWORK_SERVICE" "$PREVIOUS_AUTO_URL"
+    networksetup -setautoproxystate "$NETWORK_SERVICE" on
+    printf '  restored previous PAC proxy\n'
+  else
+    networksetup -setautoproxystate "$NETWORK_SERVICE" off
+    printf '  disabled PAC proxy\n'
   fi
   rm -f "$STATE_FILE"
 else
   networksetup -setsecurewebproxystate "$NETWORK_SERVICE" off
-  printf '  disabled secure web proxy\n'
+  networksetup -setautoproxystate "$NETWORK_SERVICE" off
+  printf '  disabled secure web and PAC proxies\n'
 fi
 
 printf 'removing local CA trust\n'

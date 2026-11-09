@@ -64,16 +64,20 @@ const EnvSchema = z.object({
   SCRIBE_VOICE_MODEL_ID: z.string().default("sw-elevenlabs-scribe"),
   SCRIBE_MODEL: z.string().default("scribe_v2_realtime"),
   SCRIBE_VAD_TUNING: boolFromEnv(true),
-  SCRIBE_VAD_SILENCE_THRESHOLD_SECS: z.coerce.number().min(0.192).max(3).default(1.5),
+  SCRIBE_VAD_SILENCE_THRESHOLD_SECS: z.coerce.number().min(0.192).max(3).default(1),
   SCRIBE_VAD_THRESHOLD: z.coerce.number().min(0.1).max(0.9).default(0.4),
   SCRIBE_MIN_SPEECH_DURATION_MS: z.coerce.number().int().min(50).max(2000).default(100),
   SCRIBE_MIN_SILENCE_DURATION_MS: z.coerce.number().int().min(50).max(2000).default(100),
+  PROXY_ALLOWED_HOSTS: z
+    .string()
+    .default("api.superwhisper.com,api.deepgram.com,api.elevenlabs.io,api.soniox.com"),
   ALLOW_TARGET_WS_PASSTHROUGH: boolFromEnv(false),
   WS_CLOSE_DELAY_MS: z.coerce.number().int().min(0).max(5000).default(350),
   SONIOX_LANGUAGE_HINTS: z.string().default("ru,en"),
   SONIOX_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   CERT_DIR: z.string().default(join(process.cwd(), "certs")),
   LOG_DIR: z.string().default(join(process.cwd(), "logs")),
+  PAC_PATH: z.string().default(join(process.cwd(), "logs", "proxy.pac")),
   TEMPLATE_PATH: z
     .string()
     .default(join(process.cwd(), "fixtures", "superwhisper-response.template.json")),

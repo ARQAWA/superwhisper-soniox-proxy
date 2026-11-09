@@ -1,9 +1,8 @@
 #!/bin/bash
-# Apply the balanced Scribe VAD profile and restart the proxy. Existing
-# SuperWhisper modes and Soniox LaunchAgent settings are left unchanged.
-#
-# This lowers finalization latency at pauses. It does not remove Soniox's
-# first-partial floor, which is dominated by the upstream handshake and model.
+# Apply the provider-recommended quality profile and restart the proxy.
+# Soniox and Scribe both run their documented defaults, which favor
+# recognition quality over endpoint latency. Existing SuperWhisper modes and
+# active selection are left unchanged.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -83,16 +82,16 @@ fi
 export WS_MODE="${WS_MODE:-soniox}"
 export DRY_RUN="${DRY_RUN:-false}"
 export SONIOX_ENDPOINT_DETECTION="${SONIOX_ENDPOINT_DETECTION:-true}"
-export SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL="${SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL:-2}"
-export SONIOX_ENDPOINT_SENSITIVITY="${SONIOX_ENDPOINT_SENSITIVITY:-0.3}"
-export SONIOX_MAX_ENDPOINT_DELAY_MS="${SONIOX_MAX_ENDPOINT_DELAY_MS:-1500}"
+export SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL="${SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL:-0}"
+export SONIOX_ENDPOINT_SENSITIVITY="${SONIOX_ENDPOINT_SENSITIVITY:-0}"
+export SONIOX_MAX_ENDPOINT_DELAY_MS="${SONIOX_MAX_ENDPOINT_DELAY_MS:-2000}"
 export SCRIBE_VAD_TUNING=true
 export SCRIBE_ENABLED="${SCRIBE_ENABLED:-true}"
 export SCRIBE_HOST="${SCRIBE_HOST:-api.elevenlabs.io}"
 export SCRIBE_PATH="${SCRIBE_PATH:-/v1/speech-to-text/realtime}"
 export SCRIBE_MODEL="${SCRIBE_MODEL:-scribe_v2_realtime}"
 export SCRIBE_VOICE_MODEL_ID="${SCRIBE_VOICE_MODEL_ID:-sw-elevenlabs-scribe}"
-export SCRIBE_VAD_SILENCE_THRESHOLD_SECS=0.5
+export SCRIBE_VAD_SILENCE_THRESHOLD_SECS=1
 export SCRIBE_VAD_THRESHOLD=0.4
 export SCRIBE_MIN_SPEECH_DURATION_MS=100
 export SCRIBE_MIN_SILENCE_DURATION_MS=100
@@ -120,8 +119,12 @@ if [ -f "$LAUNCHD_PLIST" ]; then
     printf 'refusing to edit LaunchAgent for a different installation: %s\n' "$LAUNCHD_PLIST" >&2
     exit 1
   fi
+  plist_set_env SONIOX_ENDPOINT_DETECTION true
+  plist_set_env SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL 0
+  plist_set_env SONIOX_ENDPOINT_SENSITIVITY 0
+  plist_set_env SONIOX_MAX_ENDPOINT_DELAY_MS 2000
   plist_set_env SCRIBE_VAD_TUNING true
-  plist_set_env SCRIBE_VAD_SILENCE_THRESHOLD_SECS 0.5
+  plist_set_env SCRIBE_VAD_SILENCE_THRESHOLD_SECS 1
   plist_set_env SCRIBE_VAD_THRESHOLD 0.4
   plist_set_env SCRIBE_MIN_SPEECH_DURATION_MS 100
   plist_set_env SCRIBE_MIN_SILENCE_DURATION_MS 100
@@ -151,7 +154,11 @@ profile_health_ok() {
     and .scribe_path == "/v1/speech-to-text/realtime"
     and .scribe_model == "scribe_v2_realtime"
     and .scribe_voice_model_id == "sw-elevenlabs-scribe"
-    and .scribe_vad_silence_threshold_secs == 0.5
+    and .soniox_endpoint_detection == true
+    and .soniox_endpoint_sensitivity == 0
+    and .soniox_endpoint_latency_adjustment_level == 0
+    and .soniox_max_endpoint_delay_ms == 2000
+    and .scribe_vad_silence_threshold_secs == 1
     and .scribe_vad_threshold == 0.4
     and .scribe_min_speech_duration_ms == 100
     and .scribe_min_silence_duration_ms == 100
@@ -177,12 +184,12 @@ else
   if [ -f "$LAUNCHD_PLIST" ]; then
     printf 'updated %s for the next login\n' "$LAUNCHD_PLIST"
   else
-    printf 'no LaunchAgent installed; fast profile applies until logout/reboot\n' >&2
+    printf 'no LaunchAgent installed; quality profile applies until logout/reboot\n' >&2
   fi
 fi
 
 if ! wait_for_health 60; then
-  printf 'proxy did not become healthy with the fast profile\n' >&2
+  printf 'proxy did not become healthy with the quality profile\n' >&2
   exit 1
 fi
 
@@ -208,13 +215,13 @@ if ! printf '%s\n' "$listener_pids" | grep -qx "$running_pid"; then
 fi
 
 if ! profile_health_ok; then
-  printf 'running proxy does not match the fast profile:\n' >&2
+  printf 'running proxy does not match the quality profile:\n' >&2
   proxy_health_json >&2
   printf '\n' >&2
   exit 1
 fi
 
-printf 'fast profile is active and verified\n'
+printf 'quality profile is active and verified\n'
 proxy_health_json
 printf '\n'
 printf 'existing SuperWhisper modes and active selection were preserved\n'

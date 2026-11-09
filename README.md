@@ -15,7 +15,7 @@ A local TypeScript proxy that lets **SuperWhisper 3.2.1** use **Soniox STT v6** 
 
 ```
 SuperWhisper
-   │  system HTTPS proxy 127.0.0.1:8443
+   │  macOS PAC: only allowlisted hosts -> 127.0.0.1:8443
    ▼
 local proxy (Node/TypeScript)
    ├─ batch  /v1/listen + model=nova-3              → Soniox stt-async-v6
@@ -34,7 +34,7 @@ curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/ma
 
 The installer handles Homebrew dependencies, the Keychain key prompt, the local CA, the LaunchAgent, the system proxy, and the SuperWhisper mode. See [`INSTALL.md`](INSTALL.md) for details, update/uninstall steps, and troubleshooting.
 
-Re-run the same command to upgrade an old install. The current installer requires a clean checkout on the requested branch and only fast-forwards it. It rebuilds `dist/`, verifies certificates, and applies the `0.5 s` Scribe profile without changing existing SuperWhisper modes or Soniox LaunchAgent settings. Download the current installer first; an old installed copy may still reset local changes: `curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh --upgrade`.
+Re-run the same command to upgrade an old install. The current installer requires a clean checkout on the requested branch and only fast-forwards it. It rebuilds `dist/`, verifies certificates, and applies the quality profile without changing existing SuperWhisper modes or Soniox LaunchAgent settings. Download the current installer first; an old installed copy may still reset local changes: `curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh --upgrade`.
 
 ## Requirements
 
@@ -59,9 +59,12 @@ What setup does:
 3. Stores the Soniox key in Keychain under service `soniox-proxy`, account `SONIOX_API_KEY` (the proxy reads it from there; no key is written to the repo).
 4. Checks the exact CA and leaf trust, prompting for trust if needed.
 5. Starts the proxy as a LaunchAgent (or `nohup` without `--launchd`).
-6. Enables the Wi-Fi secure web proxy pointing at `127.0.0.1:8443`.
+6. Enables a Wi-Fi PAC proxy pointing at `127.0.0.1:8443`.
+   Only the allowlisted
+   SuperWhisper, Scribe, ElevenLabs, and Soniox hosts go through the proxy.
+   Every other request stays direct.
 7. Creates missing target modes without changing existing modes or their active selection.
-8. `start-fast.sh` applies the `0.5 s` Scribe profile and preserves existing Soniox LaunchAgent settings.
+8. `start-fast.sh` applies the provider-recommended quality profile.
 9. With `--smoke`, runs the batch, pass-through, and realtime checks.
 
 Then in SuperWhisper select **Soniox Target** and dictate. The batch path and the realtime path should both use Soniox.
@@ -74,8 +77,12 @@ pnpm build
 bash scripts/gen-certs.sh                       # if certs are missing
 security add-generic-password -U -s soniox-proxy -a SONIOX_API_KEY -w "$SONIOX_API_KEY"
 security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db certs/ca.crt
-networksetup -setsecurewebproxy Wi-Fi 127.0.0.1 8443
-networksetup -setsecurewebproxystate Wi-Fi on
+node dist/src/pac-cli.js --host 127.0.0.1 --port 8443 \
+  --hosts api.superwhisper.com,api.deepgram.com,api.elevenlabs.io,api.soniox.com \
+  --out logs/proxy.pac
+networksetup -setsecurewebproxystate Wi-Fi off
+networksetup -setautoproxyurl Wi-Fi "http://127.0.0.1:8443/proxy.pac"
+networksetup -setautoproxystate Wi-Fi on
 bash scripts/start-fast.sh
 bash scripts/health.sh
 ```
@@ -139,6 +146,8 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `PROXY_HOST` / `PROXY_PORT` | `127.0.0.1` / `8443` | Loopback listener |
+| `PROXY_ALLOWED_HOSTS` | `api.superwhisper.com,api.deepgram.com,api.elevenlabs.io,api.soniox.com` | Hosts routed through the proxy; everything else stays direct |
+| `PAC_PATH` | `./logs/proxy.pac` | Generated PAC file used by the macOS proxy setting |
 | `TARGET_HOST` | `api.deepgram.com` | Intercepted host |
 | `TARGET_PATH` | `/v1/listen` | Intercepted batch path |
 | `TARGET_MODEL` | `nova-3` | Batch model value |
@@ -154,7 +163,7 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SCRIBE_VOICE_MODEL_ID` | `sw-elevenlabs-scribe` | SuperWhisper voice model ID |
 | `SCRIBE_MODEL` | `scribe_v2_realtime` | Expected upstream realtime model |
 | `SCRIBE_VAD_TUNING` | `true` | Rewrite Scribe VAD query parameters for VAD commits |
-| `SCRIBE_VAD_SILENCE_THRESHOLD_SECS` | `1.5` | Silence before a VAD commit, `0.192`–`3.0` |
+| `SCRIBE_VAD_SILENCE_THRESHOLD_SECS` | `1` | Silence before a VAD commit, `0.192`–`3.0` |
 | `SCRIBE_VAD_THRESHOLD` | `0.4` | Scribe speech-detection threshold, `0.1`–`0.9` |
 | `SCRIBE_MIN_SPEECH_DURATION_MS` | `100` | Minimum Scribe speech segment, `50`–`2000` |
 | `SCRIBE_MIN_SILENCE_DURATION_MS` | `100` | Minimum Scribe silence break, `50`–`2000` |
@@ -221,13 +230,23 @@ At `CloseStream`, the bridge uses Soniox's graceful empty-text finish and waits 
 
 Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/hour` async. The reliability fallbacks therefore add only a small premium when they trigger; they are retained because the app closes about 1.5 s after stop and a lost tail cannot be recovered later.
 
-### Balanced profile
+### Quality profile
 
-`bash scripts/start-fast.sh` applies Scribe VAD silence `0.5 s`, threshold `0.4`, and minimum speech/silence durations of `100 ms`. It creates missing target modes, but leaves existing modes, their selected language and audio source, and the active selection unchanged. Existing Soniox LaunchAgent settings are retained.
+`bash scripts/start-fast.sh` applies the quality profile.
+Scribe uses `vad_silence_threshold_secs=1`, `vad_threshold=0.4`, and
+minimum speech/silence durations of `100 ms`. SuperWhisper closes its Scribe
+socket about `1.5 s` after the user stops, so the provider default of `1.5 s`
+leaves no room for the final commit. One second keeps that margin without the
+`0.5 s` fragmentation that glued words together.
+Soniox uses `endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`,
+and `max_endpoint_delay_ms=2000`, the defaults from the
+[Soniox endpoint documentation](https://docs.soniox.com/stt/rt/endpoint-detection).
+Those defaults favor recognition accuracy: the model waits longer before
+committing a segment and splits speech into fewer pieces.
 
-The `0.5 s` threshold appears in an [ElevenLabs example](https://elevenlabs.io/docs/eleven-api/resources/libraries/scribe-stt/react-scribe); it is a starting point, not a guarantee of equal Soniox latency or accuracy. Scribe finalizes based on silence, whereas [Soniox also uses semantic endpointing](https://docs.soniox.com/stt/rt/endpoint-detection). Earlier finalization may split speech at shorter pauses.
-
-New LaunchAgents start with Soniox's documented lower-latency example: level `2`, sensitivity `0.3`, and maximum delay `1500 ms`. Existing agent values are not overwritten. The Scribe profile is persisted in the owned LaunchAgent; a nohup-only setup applies until logout or reboot.
+The same values are written to the owned LaunchAgent. Existing SuperWhisper
+modes, their language and audio source, and the active selection are left
+unchanged. A nohup-only setup applies until logout or reboot.
 
 The app folder is detected from SuperWhisper's configured location, with support for both `~/superwhisper` and the older `~/Documents/superwhisper`. `SUPERWHISPER_DOCS_DIR` can override detection for scripts and the proxy.
 
@@ -239,11 +258,13 @@ The bridge never sends a partial final. If Soniox is more than `SONIOX_RECONNECT
 
 When the active mode is **Scribe Target** (`sw-elevenlabs-scribe`), the app opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy forwards partial, committed, edited, and diagnostic messages unchanged.
 
-For `commit_strategy=vad`, the installed profile sets `vad_silence_threshold_secs=0.5`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, and `min_silence_duration_ms=100`. Manual and turn-prediction VAD parameters are not rewritten. `SCRIBE_VAD_TUNING=false` leaves the app's VAD parameters unchanged; the raw `src/config.ts` fallback remains `1.5 s`.
+For `commit_strategy=vad`, the installed profile sets `vad_silence_threshold_secs=1`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, and `min_silence_duration_ms=100`. The silence value is below the provider default of `1.5 s` so the last sentence is committed before the app closes. Manual and turn-prediction VAD parameters are not rewritten. `SCRIBE_VAD_TUNING=false` leaves the app's VAD parameters unchanged.
+
+Every Scribe socket logs `audio_frames`, `audio_bytes`, and `silence_before_close_ms`. If `silence_before_close_ms` is close to `1500`, the app is waiting for a final commit that has not arrived yet; a smaller `vad_silence_threshold_secs` moves the commit earlier.
 
 For every Scribe realtime session, the proxy sets `no_verbatim=false` so Scribe is not instructed to remove filler words. It preserves the selected language and other query parameters. SuperWhisper's separate language-model processing can still edit the text.
 
-The proxy deliberately does not batch, buffer, or suppress Scribe messages. The app closes about 1.5 s after stop, before a batch final can arrive; a batch result also cannot reach a closed client. Suppressing upstream finals therefore lost text. Forwarding the upstream `committed_transcript` is the reliable path. The only queue is the short upstream WebSocket handshake; frames are forwarded immediately after it opens. The app's own Scribe final is the transcript; the proxy adds no synthetic final.
+The proxy deliberately does not batch, buffer, or suppress Scribe messages. The app closes about 2.5 s after the last audio frame (measured 2026-11-09), before a batch final could arrive; a batch result also cannot reach a closed client. Suppressing upstream finals therefore lost text. Forwarding the upstream `committed_transcript` is the reliable path. The only queue is the short upstream WebSocket handshake; frames are forwarded immediately after it opens. The app's own Scribe final is the transcript; the proxy adds no synthetic final.
 
 While Scribe is active, other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited.
 

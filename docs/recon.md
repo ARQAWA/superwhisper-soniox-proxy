@@ -1,6 +1,9 @@
 # Reconnaissance notes
 
 Date: 2026-11-07
+
+> The shipped setup now uses a PAC allowlist instead of a global proxy. This page records the original reconnaissance, which used the secure web proxy to observe traffic.
+
 Target: SuperWhisper 3.2.1 (`/Applications/SuperWhisper.app`)
 Goal: replace the built-in Nova 3 cloud transcription with Soniox STT v6 without patching the app.
 

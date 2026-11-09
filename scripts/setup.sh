@@ -7,7 +7,7 @@
 #   - stores the Soniox API key in Keychain (prompts if absent; never echoes it)
 #   - trusts the local CA for the current user
 #   - starts the proxy (nohup by default, LaunchAgent with --launchd)
-#   - points the Wi-Fi secure web proxy at 127.0.0.1:8443
+#   - points the Wi-Fi PAC proxy at 127.0.0.1:8443 for allowlisted hosts only
 #   - optionally creates/activates the SuperWhisper mode and runs smoke tests
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
@@ -26,7 +26,7 @@ Options:
   --configure-app   Create/refresh the SuperWhisper "Soniox Target" mode and make it active.
   --launchd         Install a LaunchAgent instead of using nohup.
   --smoke           Run target, pass-through, and realtime smoke tests at the end.
-  --skip-proxy      Do not change the macOS secure web proxy setting.
+  --skip-proxy      Do not change the macOS proxy setting.
   --no-install      Do not run pnpm install if node_modules is missing.
   -h, --help        Show this help.
 EOF
@@ -275,10 +275,13 @@ else
 fi
 
 if [ "$SKIP_PROXY" = "0" ]; then
-  printf 'macOS secure web proxy\n'
+  printf 'macOS proxy (allowlist via PAC)\n'
   previous_enabled="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
   previous_server="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Server:/{print $2}')"
   previous_port="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Port:/{print $2}')"
+  previous_auto_url="$(networksetup -getautoproxyurl "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^URL:/{print $2}')"
+  previous_auto_enabled="$(networksetup -getautoproxyurl "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
+  [ "$previous_auto_url" = "(null)" ] && previous_auto_url=""
   encode_state_value() {
     printf '%s' "$1" | base64 | tr -d '\n'
   }
@@ -311,6 +314,13 @@ if [ "$SKIP_PROXY" = "0" ]; then
     state_port="$(state_read PREVIOUS_PORT)"
     state_setup_at="$(state_read SETUP_AT)"
     state_launchd="$(state_read LAUNCHD)"
+    state_auto_enabled="$(state_read PREVIOUS_AUTO_ENABLED)"
+    state_auto_url="$(state_read PREVIOUS_AUTO_URL)"
+    [ "$state_auto_url" = "(null)" ] && state_auto_url=""
+    if [ -z "$(state_raw PREVIOUS_AUTO_ENABLED_B64)$(state_raw PREVIOUS_AUTO_ENABLED)" ]; then
+      state_auto_enabled="${previous_auto_enabled:-No}"
+      state_auto_url="${previous_auto_url:-}"
+    fi
     if [ "$state_enabled" = "Yes" ] && [ "$state_server" = "$PROXY_HOST" ] && [ "$state_port" = "$PROXY_PORT" ]; then
       # An older setup rerun recorded our own proxy as the previous proxy.
       # Preserve the original state if it is sane; otherwise record "disabled"
@@ -328,6 +338,8 @@ if [ "$SKIP_PROXY" = "0" ]; then
         printf 'PREVIOUS_SERVER_B64=%s\n' "$(encode_state_value "$state_server")"
         printf 'PREVIOUS_PORT_B64=%s\n' "$(encode_state_value "$state_port")"
         printf 'LAUNCHD_B64=%s\n' "$(encode_state_value "$state_launchd")"
+        printf 'PREVIOUS_AUTO_ENABLED_B64=%s\n' "$(encode_state_value "${state_auto_enabled:-No}")"
+        printf 'PREVIOUS_AUTO_URL_B64=%s\n' "$(encode_state_value "${state_auto_url:-}")"
       } >"$STATE_FILE.migrate.$$"
       mv "$STATE_FILE.migrate.$$" "$STATE_FILE"
       printf '  preserving original proxy state: %s\n' "$STATE_FILE"
@@ -347,13 +359,23 @@ if [ "$SKIP_PROXY" = "0" ]; then
       printf 'PREVIOUS_SERVER_B64=%s\n' "$(encode_state_value "${previous_server:-}")"
       printf 'PREVIOUS_PORT_B64=%s\n' "$(encode_state_value "${previous_port:-0}")"
       printf 'LAUNCHD_B64=%s\n' "$(encode_state_value "$USE_LAUNCHD")"
+      printf 'PREVIOUS_AUTO_ENABLED_B64=%s\n' "$(encode_state_value "${previous_auto_enabled:-No}")"
+      printf 'PREVIOUS_AUTO_URL_B64=%s\n' "$(encode_state_value "${previous_auto_url:-}")"
     } >"$STATE_FILE"
   fi
-  networksetup -setsecurewebproxy "$NETWORK_SERVICE" "$PROXY_HOST" "$PROXY_PORT"
-  networksetup -setsecurewebproxystate "$NETWORK_SERVICE" on
-  printf '  %s secure proxy -> %s:%s\n' "$NETWORK_SERVICE" "$PROXY_HOST" "$PROXY_PORT"
+  mkdir -p "$(dirname "$PAC_PATH")"
+  node "$ROOT/dist/src/pac-cli.js" \
+    --host "$PROXY_HOST" --port "$PROXY_PORT" \
+    --hosts "$PROXY_ALLOWED_HOSTS" --out "$PAC_PATH" >/dev/null
+  # Only the allowlisted hosts go through the proxy; the PAC returns DIRECT
+  # for everything else, so unrelated apps never touch the proxy.
+  networksetup -setsecurewebproxystate "$NETWORK_SERVICE" off
+  networksetup -setautoproxyurl "$NETWORK_SERVICE" "http://${PROXY_HOST}:${PROXY_PORT}/proxy.pac"
+  networksetup -setautoproxystate "$NETWORK_SERVICE" on
+  printf '  %s PAC proxy -> %s:%s\n' "$NETWORK_SERVICE" "$PROXY_HOST" "$PROXY_PORT"
+  printf '  allowlist: %s\n' "$PROXY_ALLOWED_HOSTS"
 else
-  printf 'macOS secure web proxy: skipped\n'
+  printf 'macOS proxy: skipped\n'
 fi
 
 printf 'health\n'

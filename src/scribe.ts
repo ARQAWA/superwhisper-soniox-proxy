@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
+import https from "node:https";
 import { WebSocket } from "ws";
 import type { AppConfig } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
@@ -27,6 +28,30 @@ const WS_HANDSHAKE_HEADERS = new Set([
   "sec-websocket-extensions",
   "sec-websocket-protocol",
 ]);
+
+// Reuse TLS sessions so the first Scribe socket after a proxy start does not
+// pay a full handshake while SuperWhisper is already recording.
+const scribeAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 8,
+  maxCachedSessions: 16,
+});
+
+export function warmScribeTls(host: string): void {
+  const request = https.request({
+    host,
+    port: 443,
+    path: "/",
+    method: "GET",
+    agent: scribeAgent,
+    timeout: 5000,
+  });
+  request.on("error", () => {
+    // Warm-up is best effort; a failed request leaves the normal path intact.
+  });
+  request.on("timeout", () => request.destroy());
+  request.end();
+}
 
 export interface ScribeDeps {
   config: AppConfig;
@@ -162,9 +187,15 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
   const target = `wss://${host}${tunedUrl.pathname}${tunedUrl.search}`;
   const pending: ScribeFrame[] = [];
   let upstreamOpen = false;
+  let lastClientFrameAt = 0;
+  let clientFrames = 0;
+  let binaryFrames = 0;
+  let binaryBytes = 0;
+  const connectStartedAt = Date.now();
 
   const upstream = new WebSocket(target, {
     headers: copyUpstreamHeaders(req),
+    agent: scribeAgent,
     perMessageDeflate: false,
     handshakeTimeout: 10_000,
     rejectUnauthorized: true,
@@ -196,6 +227,12 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
   );
 
   client.on("message", (data, isBinary) => {
+    lastClientFrameAt = Date.now();
+    clientFrames += 1;
+    if (isBinary) {
+      binaryFrames += 1;
+      binaryBytes += rawByteLength(data);
+    }
     logger.debug(
       { request_id: requestId, kind: isBinary ? "binary" : "text", bytes: rawByteLength(data) },
       "scribe ws client frame",
@@ -206,7 +243,15 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
 
   client.on("close", (code, reason) => {
     logger.info(
-      { request_id: requestId, code, reason_bytes: reason.length },
+      {
+        request_id: requestId,
+        code,
+        reason_bytes: reason.length,
+        client_frames: clientFrames,
+        binary_frames: binaryFrames,
+        binary_bytes: binaryBytes,
+        silence_before_close_ms: lastClientFrameAt ? Date.now() - lastClientFrameAt : null,
+      },
       "scribe ws client closed",
     );
     upstream.close();
@@ -219,7 +264,10 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
   upstream.on("open", () => {
     upstreamOpen = true;
     diagnostics.recordRequestParameters("scribe", requestParameters(tunedUrl));
-    logger.info({ request_id: requestId }, "scribe ws upstream open");
+    logger.info(
+      { request_id: requestId, connect_ms: Date.now() - connectStartedAt },
+      "scribe ws upstream open",
+    );
     for (const frame of pending) upstream.send(frame.data, { binary: frame.isBinary });
     pending.length = 0;
   });

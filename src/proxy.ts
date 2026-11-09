@@ -12,6 +12,7 @@ import type { Logger } from "./logger.js";
 import { parseMultipart } from "./multipart.js";
 import { SonioxService } from "./soniox.js";
 import { attachWebSocketHandler, isScribeModeActive } from "./realtime.js";
+import { warmScribeTls } from "./scribe.js";
 import { describeSchema, loadTemplate, renderDeepgramLikeResponse, sanitizeForTemplate } from "./template.js";
 import type { ParsedMultipart, RequestMeta, RequestSummary } from "./types.js";
 import { forwardRequest, forwardStreamingRequest, resolveRealHost } from "./upstream.js";
@@ -169,6 +170,22 @@ export function createRequestHandler(deps: ProxyDeps) {
     const contentLength = Number(req.headers["content-length"] ?? 0);
 
     const localHealthHost = host === "127.0.0.1" || host === "::1" || host === "localhost";
+    if (localHealthHost && path === "/proxy.pac" && req.method === "GET") {
+      // macOS fetches the PAC over HTTP; a file:// URL is not evaluated by
+      // CFNetwork on current releases.
+      try {
+        const pac = readFileSync(config.PAC_PATH);
+        logger.info({ bytes: pac.length }, "served PAC");
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/x-ns-proxy-autoconfig");
+        res.setHeader("content-length", String(pac.length));
+        res.setHeader("cache-control", "no-cache");
+        res.end(pac);
+      } catch {
+        sendJson(res, 404, errorPayload("PAC file is not generated", "pac_missing"));
+      }
+      return;
+    }
     if (localHealthHost && path === "/__health" && (req.method === "GET" || req.method === "HEAD")) {
       sendJson(res, 200, {
         ok: true,
@@ -199,6 +216,8 @@ export function createRequestHandler(deps: ProxyDeps) {
         scribe_vad_threshold: config.SCRIBE_VAD_THRESHOLD,
         scribe_min_speech_duration_ms: config.SCRIBE_MIN_SPEECH_DURATION_MS,
         scribe_min_silence_duration_ms: config.SCRIBE_MIN_SILENCE_DURATION_MS,
+        proxy_allowed_hosts: config.PROXY_ALLOWED_HOSTS,
+        pac_path: config.PAC_PATH,
         uptime_seconds: Math.round(process.uptime()),
         diagnostics_enabled: diagnostics.isEnabled,
         diagnostics_dir: diagnostics.dir,
@@ -469,6 +488,11 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const handler = createRequestHandler({ ...deps, runtime });
   const servers: http.Server[] = [];
   const sockets = new Set<net.Socket>();
+  const scribeWarmTimer = config.SCRIBE_ENABLED
+    ? setInterval(() => warmScribeTls(config.SCRIBE_HOST), 10 * 60 * 1000)
+    : undefined;
+  scribeWarmTimer?.unref?.();
+  if (config.SCRIBE_ENABLED) warmScribeTls(config.SCRIBE_HOST);
   const trackSocket = (socket: net.Socket): void => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
@@ -541,6 +565,8 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
     }
 
     // Non-target CONNECT: raw end-to-end TLS tunnel. We never see its plaintext.
+    // Log the host only so the allowlist can be audited from the log.
+    logger.info({ host: hostname, port, mode: "tunnel" }, "CONNECT tunnel");
     void (async () => {
       try {
         const resolved = await resolveRealHost(hostname);
@@ -586,6 +612,7 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   return {
     port: config.PROXY_PORT,
     close: async () => {
+      clearInterval(scribeWarmTimer);
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       if (tlsServer) tlsServer.close();

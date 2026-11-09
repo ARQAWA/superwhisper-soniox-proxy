@@ -105,13 +105,35 @@ else
 fi
 
 printf 'system proxy\n'
-enabled="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
-server="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Server:/{print $2}')"
-port="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Port:/{print $2}')"
-if [ "$enabled" = "Yes" ] && [ "$server" = "$PROXY_HOST" ] && [ "$port" = "$PROXY_PORT" ]; then
-  ok "$NETWORK_SERVICE secure web proxy -> $PROXY_HOST:$PROXY_PORT"
+auto_enabled="$(networksetup -getautoproxyurl "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
+auto_url="$(networksetup -getautoproxyurl "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^URL:/{print $2}')"
+expected_auto_url="http://${PROXY_HOST}:${PROXY_PORT}/proxy.pac"
+if [ "$auto_enabled" = "Yes" ] && [ "$auto_url" = "$expected_auto_url" ]; then
+  ok "$NETWORK_SERVICE PAC proxy -> $PROXY_HOST:$PROXY_PORT"
 else
-  bad "$NETWORK_SERVICE secure web proxy is not $PROXY_HOST:$PROXY_PORT (enabled=$enabled server=${server:-} port=${port:-})"
+  bad "$NETWORK_SERVICE PAC proxy is not $expected_auto_url (enabled=$auto_enabled url=${auto_url:-})"
+fi
+if [ -f "$PAC_PATH" ]; then
+  pac_ok=1
+  IFS=',' read -r -a pac_hosts <<<"$PROXY_ALLOWED_HOSTS"
+  for pac_host in "${pac_hosts[@]}"; do
+    pac_host="$(printf '%s' "$pac_host" | tr -d '[:space:]')"
+    [ -z "$pac_host" ] && continue
+    if ! grep -Fq "\"$pac_host\"" "$PAC_PATH"; then
+      pac_ok=0
+    fi
+  done
+  if [ "$pac_ok" = "1" ]; then
+    ok "PAC allowlist: $PROXY_ALLOWED_HOSTS"
+  else
+    bad "PAC does not contain every allowlisted host: $PROXY_ALLOWED_HOSTS"
+  fi
+else
+  bad "missing PAC file: $PAC_PATH"
+fi
+secure_enabled="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
+if [ "$secure_enabled" = "Yes" ]; then
+  warn "$NETWORK_SERVICE secure web proxy is still enabled; it would capture every host"
 fi
 
 printf 'app\n'

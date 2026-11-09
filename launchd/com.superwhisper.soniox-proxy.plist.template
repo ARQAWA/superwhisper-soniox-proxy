@@ -24,13 +24,13 @@
     <key>SONIOX_ENDPOINT_DETECTION</key>
     <string>true</string>
     <key>SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL</key>
-    <string>2</string>
+    <string>0</string>
     <key>SONIOX_ENDPOINT_SENSITIVITY</key>
-    <string>0.3</string>
+    <string>0</string>
     <key>SONIOX_MAX_ENDPOINT_DELAY_MS</key>
-    <string>1500</string>
+    <string>2000</string>
     <key>SCRIBE_VAD_SILENCE_THRESHOLD_SECS</key>
-    <string>0.5</string>
+    <string>1</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>

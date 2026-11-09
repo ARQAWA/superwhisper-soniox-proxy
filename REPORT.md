@@ -3,11 +3,13 @@
 Date: 2026-11-07
 Environment: macOS, SuperWhisper 3.2.1, Node.js 26.7.0, Soniox `stt-async-v6` / `stt-rt-v6`
 
+> **2026-11-09 update:** the current install uses a PAC allowlist, Soniox provider defaults, and a `1 s` Scribe VAD. Measurements and health values below are historical evidence from the rounds that produced them.
+
 ## Summary
 
 SuperWhisper's built-in **Nova 3** voice model now runs on **Soniox STT v6** through a local TypeScript proxy. Both the batch path and the realtime dictation path are covered. The app binary is unmodified, SIP is enabled, and `codesign --verify --deep --strict` passes.
 
-The proxy is selected by the standard macOS secure web proxy (`127.0.0.1:8443`). Target audio never leaves the machine toward Deepgram; non-target traffic and non-target models continue to pass through to their real upstreams.
+The proxy is selected by a macOS PAC file (`127.0.0.1:8443/proxy.pac`) that routes only allowlisted hosts. Older rounds below used a system-wide secure web proxy. Target audio never leaves the machine toward Deepgram; non-target traffic and non-target models continue to pass through to their real upstreams.
 
 ## What was built
 
@@ -135,7 +137,7 @@ The selected recommendation profile is therefore:
 
 - Soniox Target with `language=auto` and microphone input.
 - Endpoint level `2`, sensitivity `0.3`, max endpoint delay `1500 ms`.
-- Scribe Target with `language=auto`, microphone input, and matching VAD: `1.5 s` silence, threshold `0.4`, `100 ms` minimum speech/silence.
+- Scribe Target with `language=auto`, microphone input, and matching VAD: `1.5 s` silence in that round, threshold `0.4`, `100 ms` minimum speech/silence. The current profile uses `1 s` silence; see README.
 - First partial still around 1.4-2.1 s; this is the Soniox floor.
 - Scribe is faster but has lower Russian quality.
 
@@ -236,7 +238,7 @@ Criterion 12 is limited by Soniox async processing latency, not by the proxy. Ba
 bash scripts/teardown.sh
 ```
 
-Stops the proxy/LaunchAgent, disables the secure web proxy (or restores the previous setting if it was captured by `setup.sh`), removes the local CA trust from the login keychain, and leaves certificates plus the Soniox key for a fast re-setup. Add `--remove-key` / `--remove-certs` to delete those too; replacement fingerprint history is retained until those roots are removed, and CA certificates are kept while their user or admin trust still needs manual removal.
+Stops the proxy/LaunchAgent, disables the PAC proxy (or restores the previous proxy setting if it was captured by `setup.sh`), removes the local CA trust from the login keychain, and leaves certificates plus the Soniox key for a fast re-setup. Add `--remove-key` / `--remove-certs` to delete those too; replacement fingerprint history is retained until those roots are removed, and CA certificates are kept while their user or admin trust still needs manual removal.
 
 ## Reproduce
 
