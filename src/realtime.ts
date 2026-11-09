@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import type { RealtimeResult, RealtimeSttSession, RealtimeToken } from "@soniox/node";
@@ -1388,12 +1388,27 @@ let activeModeCache: { at: number; modeKey: string; voiceModelId: string | null 
   voiceModelId: null,
 };
 
+function superwhisperDirectory(): string {
+  if (process.env.SUPERWHISPER_DOCS_DIR) return process.env.SUPERWHISPER_DOCS_DIR;
+  try {
+    const parent = execFileSync(
+      "/usr/bin/defaults",
+      ["read", "com.superduper.superwhisper", "appFolderDirectory"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1000 },
+    ).trim();
+    if (parent) return basename(parent) === "superwhisper" ? parent : join(parent, "superwhisper");
+  } catch {
+    // Older installations may not have an explicit app folder preference.
+  }
+  const modern = join(homedir(), "superwhisper");
+  const legacy = join(homedir(), "Documents", "superwhisper");
+  if (existsSync(join(modern, "modes"))) return modern;
+  if (existsSync(join(legacy, "modes"))) return legacy;
+  return modern;
+}
+
 export function activeModeVoiceModelId(config: AppConfig): string | null {
   let modeKey = config.TARGET_MODE_KEY;
-  const now = Date.now();
-  if (now - activeModeCache.at < 1000 && activeModeCache.modeKey === modeKey) {
-    return activeModeCache.voiceModelId;
-  }
   try {
     const out = execFileSync("/usr/bin/defaults", ["read", "com.superduper.superwhisper", "activeModeKey"], {
       encoding: "utf8",
@@ -1404,9 +1419,12 @@ export function activeModeVoiceModelId(config: AppConfig): string | null {
   } catch {
     // fall back to configured mode key
   }
+  if (Date.now() - activeModeCache.at < 1000 && activeModeCache.modeKey === modeKey) {
+    return activeModeCache.voiceModelId;
+  }
   let voiceModelId: string | null = null;
   try {
-    const modePath = join(homedir(), "Documents", "superwhisper", "modes", `${modeKey}.json`);
+    const modePath = join(superwhisperDirectory(), "modes", `${modeKey}.json`);
     const mode = JSON.parse(readFileSync(modePath, "utf8")) as { voiceModelID?: string };
     voiceModelId = mode.voiceModelID ?? null;
   } catch {

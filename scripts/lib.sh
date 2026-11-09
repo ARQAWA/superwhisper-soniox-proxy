@@ -29,6 +29,56 @@ require_cmd() {
   }
 }
 
+superwhisper_docs_dir() {
+  local parent modern legacy
+  if [ -n "${SUPERWHISPER_DOCS_DIR:-}" ]; then
+    printf '%s\n' "$SUPERWHISPER_DOCS_DIR"
+    return
+  fi
+  parent="$(defaults read com.superduper.superwhisper appFolderDirectory 2>/dev/null || true)"
+  if [ -n "$parent" ]; then
+    if [ "$(basename "$parent")" = "superwhisper" ]; then
+      printf '%s\n' "$parent"
+    else
+      printf '%s/superwhisper\n' "${parent%/}"
+    fi
+    return
+  fi
+  modern="$HOME/superwhisper"
+  legacy="$HOME/Documents/superwhisper"
+  if [ -d "$modern/modes" ]; then
+    printf '%s\n' "$modern"
+  elif [ -d "$legacy/modes" ]; then
+    printf '%s\n' "$legacy"
+  else
+    printf '%s\n' "$modern"
+  fi
+}
+
+build_proxy() (
+  local build_dir="" build_backup="" build_swapped=0
+  cleanup_build() {
+    if [ "$build_swapped" = "0" ] && [ -n "$build_backup" ] && [ -e "$build_backup/dist" ]; then
+      if [ -e "$ROOT/dist" ] || ! mv "$build_backup/dist" "$ROOT/dist"; then
+        printf 'previous build remains at %s/dist\n' "$build_backup" >&2
+        return
+      fi
+    fi
+    [ -z "$build_dir" ] || rm -rf "$build_dir"
+    [ -z "$build_backup" ] || rm -rf "$build_backup"
+  }
+  trap cleanup_build EXIT
+  cd "$ROOT" || return 1
+  build_dir="$(mktemp -d "$ROOT/.dist-build.XXXXXX")" || return 1
+  build_backup="$(mktemp -d "$ROOT/.dist-backup.XXXXXX")" || return 1
+  pnpm exec tsc -p tsconfig.json --outDir "$build_dir" || return 1
+  if [ -e "$ROOT/dist" ]; then
+    mv "$ROOT/dist" "$build_backup/dist" || return 1
+  fi
+  mv "$build_dir" "$ROOT/dist" || return 1
+  build_swapped=1
+)
+
 security_timeout() {
   local timeout_bin=""
   if command -v timeout >/dev/null 2>&1; then
@@ -146,6 +196,17 @@ launchctl_service_is_this_install() {
   [ "$entry" = "$ROOT/dist/src/index.js" ]
 }
 
+bootstrap_agent() {
+  local _
+  for _ in $(seq 1 40); do
+    if launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  return 1
+}
+
 keychain_key_present() {
   security find-generic-password -s "$KEYCHAIN_SERVICE" -a "$KEYCHAIN_ACCOUNT" >/dev/null 2>&1
 }
@@ -179,7 +240,17 @@ trust_settings_has_ca() {
 }
 
 ca_chain_verifies() {
-  [ -f "$LEAF_CRT" ] && security verify-cert -c "$LEAF_CRT" -p ssl >/dev/null 2>&1
+  local expected anchor
+  [ -f "$CA_CRT" ] && [ -f "$LEAF_CRT" ] || return 1
+  expected="$(openssl x509 -in "$CA_CRT" -noout -fingerprint -sha256 2>/dev/null)" || return 1
+  anchor="$(security verify-cert -c "$LEAF_CRT" -c "$CA_CRT" -p ssl -P 2>/dev/null \
+    | awk '
+      /-----BEGIN CERTIFICATE-----/ { cert = ""; capture = 1 }
+      capture { cert = cert $0 ORS }
+      /-----END CERTIFICATE-----/ { capture = 0 }
+      END { printf "%s", cert }
+    ' | openssl x509 -noout -fingerprint -sha256 2>/dev/null)" || return 1
+  [ -n "$expected" ] && [ "$anchor" = "$expected" ]
 }
 
 ca_root_trusted() {
@@ -194,7 +265,7 @@ ca_days_left() {
     return
   fi
   local end_epoch now_epoch
-  end_epoch="$(date -j -f '%b %d %H:%M:%S %Y %Z' "$end" '+%s' 2>/dev/null || true)"
+  end_epoch="$(LC_ALL=C TZ=GMT date -j -f '%b %d %H:%M:%S %Y' "${end% GMT}" '+%s' 2>/dev/null || true)"
   now_epoch="$(date '+%s')"
   if [ -z "$end_epoch" ]; then
     printf 'unknown\n'

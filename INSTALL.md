@@ -20,12 +20,12 @@ The installer will:
 4. Clone the proxy to `~/.local/share/superwhisper-soniox-proxy`.
 5. Create a local CA and leaf certificate for the MITM.
 6. Trust the CA for your user (macOS may ask for confirmation).
-7. Build and start the proxy as a **LaunchAgent** (falls back to `nohup` if the agent cannot start).
+7. Build and start the proxy as a **LaunchAgent**.
 8. Point the **Wi-Fi secure web proxy** at `127.0.0.1:8443`.
-9. Create/activate the SuperWhisper **Soniox Target** and **Scribe Target** modes.
-10. Apply the current `1.5 s` Soniox/Scribe endpoint profile and restart the app.
+9. Create missing **Soniox Target** and **Scribe Target** modes.
+10. Apply the `0.5 s` Scribe VAD profile.
 
-After it finishes, open SuperWhisper, select **Soniox Target**, and dictate.
+Existing modes, their selected languages and audio sources, the active selection, and existing Soniox LaunchAgent settings are preserved. After installation, select the target mode you want in SuperWhisper.
 
 If you prefer not to pipe a script from the internet, download it first:
 
@@ -70,18 +70,15 @@ The installer can install Node, pnpm, and jq through Homebrew. If Homebrew is no
 | Wi-Fi secure web proxy `127.0.0.1:8443` | `scripts/teardown.sh` |
 | SuperWhisper mode `soniox-target` and active mode key | Remove the mode in SuperWhisper / use another mode |
 
-The CA is local-only. Audio is sent only to Soniox; non-target traffic passes through to its real upstream.
+The CA is local-only. Soniox target audio goes to Soniox, and Scribe target audio goes to ElevenLabs. Non-target traffic passes through to its real upstream.
 
 ## Verify
 
 ```bash
 bash ~/.local/share/superwhisper-soniox-proxy/scripts/health.sh
-bash ~/.local/share/superwhisper-soniox-proxy/scripts/smoke-target.sh
-bash ~/.local/share/superwhisper-soniox-proxy/scripts/smoke-passthrough.sh
-node ~/.local/share/superwhisper-soniox-proxy/scripts/smoke-realtime.mjs
 ```
 
-The realtime smoke test prints only lengths and word counts, never the transcript.
+Do not run smoke tests or microphone capture without the user's permission. The user can check dictation later.
 
 ## Upgrade an old install
 
@@ -91,23 +88,26 @@ Re-run the same one command:
 curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh | bash
 ```
 
-The upgrade path is intentionally clean:
+The upgrade path preserves user changes:
 
-1. Stops the old proxy and the matching LaunchAgent.
-2. Resets the installed checkout to `main`.
-3. Removes the old `dist/` build so deleted files cannot survive.
-4. Installs the locked dependencies from the current `pnpm-lock.yaml`.
-5. Refreshes certificates, Keychain, proxy state, and LaunchAgent settings.
-6. Updates both SuperWhisper modes and applies the current `1.5 s` profile.
-7. Relaunches SuperWhisper.
+1. Refuses a dirty checkout, a different branch, or a non-fast-forward update.
+2. Fetches `main` and fast-forwards the installed checkout.
+3. Installs locked dependencies and stages a fresh `dist/` build.
+4. Reuses valid certificates and verifies the actual trust chain.
+5. Renews an expired, expiring, invalid, or mismatched certificate when needed.
+6. Starts the owned proxy and applies the `0.5 s` Scribe profile.
+7. Preserves existing modes, the active mode, and Soniox LaunchAgent settings.
 
-It keeps your Soniox key, diagnostic traces, and SuperWhisper recordings, and keeps local certificates unless the CA is expiring. It does not touch unrelated LaunchAgents or apps.
+If the checkout has local changes or divergent history, stop and ask the user before resolving them. Do not use `git reset --hard` or forced checkout. The installer keeps the Soniox key, diagnostic traces, SuperWhisper recordings, and unrelated LaunchAgents.
+
+SuperWhisper may store its configuration under `~/superwhisper`, the older `~/Documents/superwhisper`, or a user-selected parent folder. The proxy and installer read the configured location. Set `SUPERWHISPER_DOCS_DIR` only when an explicit override is needed.
+
+If the root must be replaced, setup verifies the new root and leaf before cleaning up the replaced login-keychain root. macOS may request trust approval. Do not remove unrelated trusted roots or force a replacement merely for an upgrade.
 
 For a manual checkout:
 
 ```bash
 git pull --ff-only
-rm -rf dist
 pnpm install --frozen-lockfile
 bash scripts/setup.sh --no-install --skip-proxy --launchd
 bash scripts/start-fast.sh
@@ -123,7 +123,7 @@ Preferred, from the public installer:
 curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh | bash
 ```
 
-Old installed checkouts need the current installer first, because the old script does not know `--upgrade`:
+Old installed checkouts must download the current installer first. The old script may reset local changes:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh
@@ -134,13 +134,12 @@ From a manual development checkout:
 
 ```bash
 git pull --ff-only
-rm -rf dist
 pnpm install --frozen-lockfile
 bash scripts/setup.sh --no-install --skip-proxy --launchd
 bash scripts/start-fast.sh
 ```
 
-Re-running the installer, or `install.sh --upgrade`, is the supported upgrade path. Do not run the old `scripts/setup.sh` alone: it does not remove the previous build or apply the current endpoint profile.
+Re-running the current installer, or `install.sh --upgrade`, is the supported upgrade path. Do not run the old `scripts/setup.sh` alone: it does not apply the current Scribe profile.
 
 ## Uninstall
 
@@ -159,7 +158,7 @@ If the CA was also trusted in the System keychain, the script prints the `sudo` 
 | `install.sh: permission denied` | Run `bash /tmp/install.sh`, not `./install.sh`, or `chmod +x install.sh`. |
 | Installer cannot prompt for the key | Download and run the script directly instead of piping it: `curl -o /tmp/install.sh ... && bash /tmp/install.sh`. |
 | SuperWhisper does not trust the proxy | Run `bash scripts/health.sh`, approve the macOS certificate dialog, then quit/reopen SuperWhisper. |
-| LaunchAgent does not become healthy | Run `bash scripts/setup.sh` (nohup mode), then `bash scripts/start-fast.sh` to restore the profile; inspect `logs/proxy.stderr.log`. |
+| LaunchAgent does not become healthy | Inspect `logs/proxy.stderr.log`; use the explicit `--no-launchd` option only if the user accepts nohup mode. |
 | Realtime falls back to batch | Check `logs/proxy.log` for `soniox realtime connected` / `CloseStream`; confirm the active mode is `soniox-target`. |
 | Realtime hangs or cuts the end | Run `bash scripts/diagnostics.sh`; review `client_closed_before_final` and `close_to_finish_ms` in `~/Library/Caches/soniox-proxy/diagnostics/`. |
 | Batch is slow | Soniox async processing p95 is around 4 s; realtime dictation avoids it. |
@@ -171,8 +170,7 @@ If the CA was also trusted in the System keychain, the script prints the `sudo` 
 git clone https://github.com/ARQAWA/superwhisper-soniox-proxy.git
 cd superwhisper-soniox-proxy
 export SONIOX_API_KEY='...'
-bash scripts/setup.sh --launchd --configure-app
-bash scripts/start-fast.sh
+bash install.sh
 ```
 
 Add `--smoke` to `setup.sh` to run the batch, pass-through, and realtime checks.

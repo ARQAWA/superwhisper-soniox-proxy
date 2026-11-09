@@ -5,6 +5,7 @@
 # SuperWhisper must be closed while its files are edited: otherwise the app can
 # write its in-memory settings back on quit and overwrite the changes.
 set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
 APP_DOMAIN="${APP_DOMAIN:-com.superduper.superwhisper}"
 MODE_KEY="${MODE_KEY:-soniox-target}"
@@ -14,14 +15,9 @@ VOICE_MODEL_ID="${VOICE_MODEL_ID:-sw-deepgram-nova-3}"
 TEMPLATE_MODE="${TEMPLATE_MODE:-message}"
 PRESERVE_MODE="${PRESERVE_MODE:-0}"
 NO_RESTART="${NO_RESTART:-0}"
-DOCS_DIR="${SUPERWHISPER_DOCS_DIR:-$HOME/Documents/superwhisper}"
-
-require_cmd() {
-  command -v "$1" >/dev/null 2>&1 || {
-    printf 'missing required command: %s\n' "$1" >&2
-    exit 1
-  }
-}
+ACTIVATE_MODE="${ACTIVATE_MODE:-1}"
+KEEP_EXISTING_MODE="${KEEP_EXISTING_MODE:-0}"
+DOCS_DIR="$(superwhisper_docs_dir)"
 
 require_cmd jq
 require_cmd defaults
@@ -67,6 +63,13 @@ else
 fi
 
 existing_mode="$DOCS_DIR/modes/$MODE_KEY.json"
+if [ "$KEEP_EXISTING_MODE" = "1" ] && [ -f "$existing_mode" ]; then
+  printf 'existing mode left unchanged: %s\n' "$existing_mode"
+  if [ "$NO_RESTART" != "1" ]; then
+    open -a SuperWhisper
+  fi
+  exit 0
+fi
 if [ "$PRESERVE_MODE" = "1" ] && [ -f "$existing_mode" ]; then
   # Re-check after the app exits: SuperWhisper may write an in-memory change
   # back on quit. Do not mutate or activate an incompatible mode.
@@ -133,8 +136,10 @@ else
   printf 'created %s with the mode key\n' "$settings"
 fi
 
-defaults write "$APP_DOMAIN" activeModeKey -string "$MODE_KEY"
-defaults write "$APP_DOMAIN" lastSelectedModeKey -string "$MODE_KEY"
+if [ "$ACTIVATE_MODE" = "1" ]; then
+  defaults write "$APP_DOMAIN" activeModeKey -string "$MODE_KEY"
+  defaults write "$APP_DOMAIN" lastSelectedModeKey -string "$MODE_KEY"
+fi
 
 printf 'mode %s is ready: %s\n' "$MODE_KEY" "$DOCS_DIR/modes/$MODE_KEY.json"
 jq '{key, name, voiceModelID, language, realtimeOutput, autoPaste}' "$DOCS_DIR/modes/$MODE_KEY.json"

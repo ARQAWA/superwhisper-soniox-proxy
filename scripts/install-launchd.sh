@@ -30,15 +30,22 @@ if ! (cd "$ROOT" && bash scripts/stop.sh); then
 fi
 
 node_path="$(command -v node)"
-sed \
-  -e "s|__LABEL__|$LAUNCHD_LABEL|g" \
-  -e "s|__NODE__|$node_path|g" \
-  -e "s|__ROOT__|$ROOT|g" \
-  "$template" >"$LAUNCHD_PLIST"
+if [ -f "$LAUNCHD_PLIST" ]; then
+  /usr/libexec/PlistBuddy -c "Set :ProgramArguments:0 $node_path" "$LAUNCHD_PLIST"
+else
+  sed \
+    -e "s|__LABEL__|$LAUNCHD_LABEL|g" \
+    -e "s|__NODE__|$node_path|g" \
+    -e "s|__ROOT__|$ROOT|g" \
+    "$template" >"$LAUNCHD_PLIST"
+fi
 chmod 644 "$LAUNCHD_PLIST"
 
 launchctl bootout "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 || true
-launchctl bootstrap "gui/$(id -u)" "$LAUNCHD_PLIST"
+if ! bootstrap_agent; then
+  printf 'could not bootstrap LaunchAgent: %s\n' "$LAUNCHD_PLIST" >&2
+  exit 1
+fi
 launchctl enable "gui/$(id -u)/$LAUNCHD_LABEL"
 launchctl kickstart -k "gui/$(id -u)/$LAUNCHD_LABEL"
 

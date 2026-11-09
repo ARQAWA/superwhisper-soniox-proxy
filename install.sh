@@ -56,7 +56,7 @@ done
 [ "$(id -u)" -eq 0 ] && die "run this as your normal macOS user, not with sudo/root"
 
 # If this script is the installed checkout's own installer, treat a plain
-# re-run as an upgrade. Do this before the self-update re-exec so a reset cannot
+# re-run as an upgrade. Do this before the self-update re-exec so an update cannot
 # change the running script.
 script_source="${BASH_SOURCE[0]:-}"
 auto_upgrade=0
@@ -72,8 +72,8 @@ if [ "$auto_upgrade" = "1" ] && [ "$FORCE_UPGRADE" != "1" ]; then
   FORCE_UPGRADE=1
 fi
 
-# --upgrade may reset the checkout that contains this script. Re-exec from the
-# already-open file descriptor so git reset cannot change the running script.
+# --upgrade may update the checkout that contains this script. Re-exec from the
+# already-open file descriptor so the update cannot change the running script.
 if [ "$FORCE_UPGRADE" = "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
   exec bash -s -- "$@" <"$script_source"
 fi
@@ -92,9 +92,15 @@ if [ -z "$ROOT" ]; then
   mkdir -p "$(dirname "$INSTALL_DIR")"
   if [ -d "$INSTALL_DIR/.git" ]; then
     say "updating $INSTALL_DIR"
-    git -C "$INSTALL_DIR" fetch --depth 1 origin "$BRANCH"
-    git -C "$INSTALL_DIR" checkout -q -f -B "$BRANCH" "origin/$BRANCH"
-    git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH"
+    if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
+      die "local changes in $INSTALL_DIR; save them before upgrading"
+    fi
+    current_branch="$(git -C "$INSTALL_DIR" symbolic-ref --quiet --short HEAD || true)"
+    [ "$current_branch" = "$BRANCH" ] \
+      || die "expected branch $BRANCH in $INSTALL_DIR, found ${current_branch:-detached HEAD}"
+    git -C "$INSTALL_DIR" fetch origin "$BRANCH"
+    git -C "$INSTALL_DIR" merge --ff-only FETCH_HEAD \
+      || die "cannot fast-forward $INSTALL_DIR; resolve its git history before upgrading"
   else
     say "cloning $REPO_URL"
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
@@ -145,8 +151,7 @@ command -v security >/dev/null 2>&1 || die "macOS security tool is required"
 command -v networksetup >/dev/null 2>&1 || die "macOS networksetup tool is required"
 
 if [ "$REMOTE_INSTALL" = "1" ]; then
-  say "upgrading existing checkout: cleaning old build and installing locked dependencies"
-  rm -rf "$ROOT/dist"
+  say "installing locked dependencies"
   (cd "$ROOT" && pnpm install --frozen-lockfile)
 fi
 
@@ -182,22 +187,15 @@ setup_args=()
 [ "$RUN_SMOKE" = "1" ] && setup_args+=(--smoke)
 
 say "installing from $ROOT"
-if ! bash scripts/setup.sh "${setup_args[@]}"; then
-  if [ "$USE_LAUNCHD" = "1" ]; then
-    say "LaunchAgent setup failed; falling back to nohup mode."
-    fallback_args=()
-    [ "$RUN_SMOKE" = "1" ] && fallback_args+=(--smoke)
-    bash scripts/setup.sh "${fallback_args[@]}"
-  else
-    exit 1
-  fi
-fi
+bash scripts/setup.sh "${setup_args[@]}"
 
-if [ "$CONFIGURE_APP" = "1" ]; then
-  say "applying the current Soniox and Scribe profile"
-  if ! (cd "$ROOT" && bash scripts/start-fast.sh); then
-    die "proxy setup succeeded, but the current profile failed to apply. Run: bash $ROOT/scripts/start-fast.sh"
-  fi
+skip_mode_setup=0
+if [ "$CONFIGURE_APP" != "1" ]; then
+  skip_mode_setup=1
+fi
+say "applying the current Scribe profile"
+if ! (cd "$ROOT" && SKIP_MODE_SETUP="$skip_mode_setup" bash scripts/start-fast.sh); then
+  die "proxy setup succeeded, but the current profile failed to apply. Run: bash $ROOT/scripts/start-fast.sh"
 fi
 
 say ""
@@ -205,6 +203,6 @@ say "installed at: $ROOT"
 say "health:       bash \"$ROOT/scripts/health.sh\""
 say "logs:         \"$ROOT/logs/proxy.log\""
 say "uninstall:    bash \"$ROOT/scripts/teardown.sh\""
-say "update:       re-run this installer (resets the checkout, cleans old dist, applies the current profile)"
+say "update:       re-run this installer (requires a clean checkout)"
 say ""
-say "Open SuperWhisper and select the \"Soniox Target\" mode, then dictate."
+say "Open SuperWhisper and select the target mode you want to use."

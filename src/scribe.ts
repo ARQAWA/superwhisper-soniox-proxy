@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { WebSocket } from "ws";
 import type { AppConfig } from "./config.js";
+import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
 import { redactQuery } from "./url-utils.js";
@@ -30,6 +31,7 @@ const WS_HANDSHAKE_HEADERS = new Set([
 export interface ScribeDeps {
   config: AppConfig;
   logger: Logger;
+  diagnostics: Diagnostics;
 }
 
 interface ScribeFrame {
@@ -71,6 +73,39 @@ function numericQueryParam(url: URL, key: string): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+function requestParameters(url: URL): Array<[string, string]> {
+  return [...url.searchParams].map(([name, value]) => {
+    const key = name.toLowerCase().replace(/[-_]/g, "");
+    const numericValue = /^\d+(?:\.\d+)?$/.test(value);
+    const tokenSetting =
+      numericValue &&
+      (/^(?:min|max|num|numberof|total).*tokens?/.test(key) ||
+        /^tokens?(?:count|limit|size)$/.test(key)) &&
+      !/access|refresh|auth|bearer|session|secret|credential|apikey/.test(key);
+    const audioSetting =
+      numericValue && /(?:size|count|length|duration|rate|threshold|interval|ms|hz)$/.test(key);
+    const audioPayload =
+      key.includes("audio") &&
+      (key === "audio" ||
+        /base64|data|bytes|payload|content|file|json|raw|blob|binary|buffer|chunk|samples/.test(key)) &&
+      !audioSetting;
+    const transcriptPayload =
+      key.includes("transcript") &&
+      !(key.startsWith("include") && /^(?:true|false)$/i.test(value)) &&
+      !(key === "transcriptformat" && /^[a-z0-9_-]+$/i.test(value));
+    const sensitive =
+      key.includes("key") ||
+      /auth|bearer|credential|password|secret|cookie|prompt|context/.test(key) ||
+      (key.includes("token") && !tokenSetting) ||
+      audioPayload ||
+      key === "utterance" ||
+      (key.includes("text") &&
+        !(key.startsWith("enable") && /^(?:true|false)$/i.test(value))) ||
+      transcriptPayload;
+    return [name, sensitive ? "[REDACTED]" : value];
+  });
+}
+
 export interface ScribeFrameSink {
   readyState: number;
   send(data: WebSocket.RawData, options: { binary: boolean }): void;
@@ -109,7 +144,7 @@ export function forwardScribeFrame(
 }
 
 export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: ScribeDeps): void {
-  const { config, logger } = deps;
+  const { config, logger, diagnostics } = deps;
   const requestId = randomUUID();
   const host = splitHostPort(String(req.headers.host ?? "")).hostname;
   const url = new URL(String(req.url ?? "/"), `https://${host}`);
@@ -120,7 +155,8 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
         minSpeechDurationMs: config.SCRIBE_MIN_SPEECH_DURATION_MS,
         minSilenceDurationMs: config.SCRIBE_MIN_SILENCE_DURATION_MS,
       })
-    : url;
+    : new URL(url.toString());
+  tunedUrl.searchParams.set("no_verbatim", "false");
   const vadApplied =
     config.SCRIBE_VAD_TUNING && url.searchParams.get("commit_strategy") === "vad";
   const target = `wss://${host}${tunedUrl.pathname}${tunedUrl.search}`;
@@ -182,6 +218,7 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
 
   upstream.on("open", () => {
     upstreamOpen = true;
+    diagnostics.recordRequestParameters("scribe", requestParameters(tunedUrl));
     logger.info({ request_id: requestId }, "scribe ws upstream open");
     for (const frame of pending) upstream.send(frame.data, { binary: frame.isBinary });
     pending.length = 0;

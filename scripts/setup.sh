@@ -145,7 +145,7 @@ if [ -f "$CA_CRT" ]; then
       : >"$CA_RENEWAL_FLAG"
     else
       days="$(ca_days_left)"
-      if [ "$days" != "unknown" ] && [ "$days" -lt 7 ]; then
+      if ! openssl x509 -in "$CA_CRT" -checkend 604800 -noout >/dev/null 2>&1; then
         printf '  CA expires in %s days; renewing CA and leaf\n' "$days"
         CA_RENEWED=1
         CA_RENEW_NOW=1
@@ -171,23 +171,20 @@ elif [ ! -f "$CA_CRT" ] || [ ! -f "$LEAF_CRT" ] || [ ! -f "$CERT_DIR/leaf.key" ]
   (cd "$ROOT" && bash scripts/gen-certs.sh)
 else
   printf '  using existing %s\n' "$CA_CRT"
-  if ! openssl x509 -in "$LEAF_CRT" -noout -text 2>/dev/null | grep -q "api.elevenlabs.io"; then
-    printf '  leaf certificate lacks api.elevenlabs.io; renewing\n'
+  leaf_pub="$(openssl x509 -in "$LEAF_CRT" -noout -pubkey 2>/dev/null || true)"
+  leaf_key_pub="$(openssl pkey -in "$CERT_DIR/leaf.key" -pubout 2>/dev/null || true)"
+  if [ -z "$leaf_key_pub" ]; then
+    printf '  leaf private key is invalid; preserve it and resolve manually\n' >&2
+    exit 1
+  fi
+  if [ -z "$leaf_pub" ] || [ "$leaf_pub" != "$leaf_key_pub" ] \
+    || ! openssl x509 -in "$LEAF_CRT" -checkend 604800 -noout >/dev/null 2>&1 \
+    || ! openssl verify -CAfile "$CA_CRT" "$LEAF_CRT" >/dev/null 2>&1 \
+    || ! openssl x509 -in "$LEAF_CRT" -noout -text 2>/dev/null | grep -Fq "DNS:api.deepgram.com" \
+    || ! openssl x509 -in "$LEAF_CRT" -noout -text 2>/dev/null | grep -Fq "DNS:api.superwhisper.com" \
+    || ! openssl x509 -in "$LEAF_CRT" -noout -text 2>/dev/null | grep -Fq "DNS:api.elevenlabs.io"; then
+    printf '  leaf certificate needs renewal\n'
     (cd "$ROOT" && bash scripts/gen-certs.sh)
-  fi
-fi
-
-if [ "$CA_RENEWED" = "1" ]; then
-  if [ -n "$CA_OLD_HASH" ]; then
-    cleanup_login_cert "$CA_OLD_HASH"
-  fi
-  if [ -f "$CA_OLD_HASH_FILE" ]; then
-    while IFS= read -r old_hash; do
-      if [ -z "$old_hash" ] || [ "$old_hash" = "$CA_OLD_HASH" ]; then
-        continue
-      fi
-      cleanup_login_cert "$old_hash"
-    done <"$CA_OLD_HASH_FILE"
   fi
 fi
 
@@ -215,38 +212,36 @@ fi
 
 printf 'certificate trust\n'
 need_trust=0
-if [ "$CA_RENEWED" = "1" ]; then
-  if ca_root_trusted && ca_chain_verifies; then
-    printf '  renewed CA is already trusted\n'
-  else
-    need_trust=1
-  fi
-elif ca_in_login_keychain || trust_settings_has_ca || ca_chain_verifies; then
-  printf '  CA is already present and trusted\n'
+if ca_root_trusted && ca_chain_verifies; then
+  printf '  current CA and leaf are already trusted\n'
 else
   need_trust=1
 fi
 if [ "$need_trust" = "1" ]; then
   # User-domain trust does not require sudo. The app runs as this user.
   if security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_CRT" >/dev/null 2>&1; then
-    if [ "$CA_RENEWED" = "1" ]; then
-      printf '  renewed CA imported into the login keychain with user trust\n'
-    else
-      printf '  CA imported into the login keychain with user trust\n'
-    fi
+    printf '  CA imported into the login keychain with user trust\n'
   else
-    if [ "$CA_RENEWED" = "1" ]; then
-      printf '  renewed CA trust failed; run: security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n' "$CA_CRT" >&2
-      exit 1
-    fi
-    printf '  warning: could not add user trust automatically\n' >&2
+    printf '  could not add user trust automatically\n' >&2
     printf '  run: security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n' "$CA_CRT" >&2
+    exit 1
   fi
 fi
+if ! ca_root_trusted || ! ca_chain_verifies; then
+  printf '  current CA is not effectively trusted or does not verify the leaf\n' >&2
+  exit 1
+fi
 if [ "$CA_RENEWED" = "1" ]; then
-  if ! ca_root_trusted || ! ca_chain_verifies; then
-    printf '  renewed CA is not effectively trusted or does not verify the leaf\n' >&2
-    exit 1
+  if [ -n "$CA_OLD_HASH" ]; then
+    cleanup_login_cert "$CA_OLD_HASH"
+  fi
+  if [ -f "$CA_OLD_HASH_FILE" ]; then
+    while IFS= read -r old_hash; do
+      if [ -z "$old_hash" ] || [ "$old_hash" = "$CA_OLD_HASH" ]; then
+        continue
+      fi
+      cleanup_login_cert "$old_hash"
+    done <"$CA_OLD_HASH_FILE"
   fi
   if [ "$CA_CLEANUP_PENDING" = "1" ]; then
     printf '  replaced-root cleanup incomplete; keeping the renewal marker for the next setup\n' >&2
@@ -256,7 +251,7 @@ if [ "$CA_RENEWED" = "1" ]; then
 fi
 
 printf 'build\n'
-(cd "$ROOT" && pnpm build)
+build_proxy
 
 printf 'proxy\n'
 if ! (cd "$ROOT" && bash scripts/stop.sh); then

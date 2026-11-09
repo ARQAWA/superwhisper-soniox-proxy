@@ -127,9 +127,9 @@ export class SonioxService {
     maxEndpointDelayMs: number;
     clientReferenceId: string;
   }): RealtimeSttSession {
-    return this.client.realtime.stt({
+    const parameters = {
       model: this.config.SONIOX_REALTIME_MODEL,
-      audio_format: "pcm_s16le",
+      audio_format: "pcm_s16le" as const,
       sample_rate: options.sampleRate,
       num_channels: options.channels,
       language_hints: options.languageHints,
@@ -144,7 +144,12 @@ export class SonioxService {
             max_endpoint_delay_ms: options.maxEndpointDelayMs,
           }
         : {}),
+    };
+    const session = this.client.realtime.stt(parameters);
+    session.on("connected", () => {
+      this.diagnostics?.recordRequestParameters("soniox", parameters);
     });
+    return session;
   }
 
   async transcribe(

@@ -1,6 +1,11 @@
 import {
   appendFileSync,
+  closeSync,
+  constants,
+  fchmodSync,
+  fstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -665,6 +670,34 @@ export class Diagnostics {
         code: "batch_failed",
         ...record,
       });
+    }
+  }
+
+  recordRequestParameters(provider: "soniox" | "scribe", parameters: unknown): void {
+    try {
+      mkdirSync(this.options.dir, { recursive: true, mode: 0o700 });
+      const path = join(this.options.dir, "request-parameters.jsonl");
+      const fd = openSync(
+        path,
+        constants.O_WRONLY |
+          constants.O_APPEND |
+          constants.O_CREAT |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK,
+        0o600,
+      );
+      try {
+        if (!fstatSync(fd).isFile()) throw new Error("request parameter log is not a regular file");
+        fchmodSync(fd, 0o600);
+        writeFileSync(
+          fd,
+          JSON.stringify({ at: new Date().toISOString(), provider, parameters }) + "\n",
+        );
+      } finally {
+        closeSync(fd);
+      }
+    } catch (err) {
+      this.logger.warn({ error: errorLabel(err) }, "request parameter log unavailable");
     }
   }
 
