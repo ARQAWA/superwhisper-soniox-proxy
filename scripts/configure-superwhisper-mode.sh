@@ -78,9 +78,10 @@ fi
 
 tmp_mode="$(mktemp "$DOCS_DIR/modes/.$MODE_KEY.XXXXXX")"
 if [ "$PRESERVE_MODE" = "1" ] && [ -f "$existing_mode" ]; then
-  # Update only the language and auto-paste. This is used by start-fast.sh so a
-  # customized mode keeps its prompt, activation rules, and other settings.
-  jq --arg language "$LANGUAGE" '.language = $language | .autoPaste = true' "$existing_mode" >"$tmp_mode"
+  # Update only the language, auto-paste, and audio source. This is used by
+  # start-fast.sh so a customized mode keeps its prompt, activation rules, and
+  # other settings while both target modes use the same dictation source.
+  jq --arg language "$LANGUAGE" '.language = $language | .autoPaste = true | .useSystemAudio = false' "$existing_mode" >"$tmp_mode"
 elif [ -n "$template_path" ] && [ -f "$template_path" ]; then
   jq \
     --arg key "$MODE_KEY" \
@@ -96,6 +97,7 @@ elif [ -n "$template_path" ] && [ -f "$template_path" ]; then
      | .autoPaste = true
      | .realtimeOutput = true
      | .diarize = false
+     | .useSystemAudio = false
      | .prompt = ""
      | .promptExamples = []
      | .description = ""' \

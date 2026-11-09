@@ -34,6 +34,8 @@ curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/ma
 
 The installer handles Homebrew dependencies, the Keychain key prompt, the local CA, the LaunchAgent, the system proxy, and the SuperWhisper mode. See [`INSTALL.md`](INSTALL.md) for details, update/uninstall steps, and troubleshooting.
 
+Re-run the same command to upgrade an old install. It stops the old proxy, resets the checkout, removes the stale `dist/` build, installs the current locked dependencies, and applies the current `1.5 s` Soniox and Scribe profile. Old installed checkouts should download the current installer first: `curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh --upgrade`.
+
 ## Requirements
 
 - macOS with SuperWhisper 3.2.1 installed
@@ -48,7 +50,8 @@ From the repository root:
 
 ```bash
 export SONIOX_API_KEY='...'          # or let setup.sh prompt with hidden input
-bash scripts/setup.sh --configure-app --smoke
+bash scripts/setup.sh --launchd --configure-app
+bash scripts/start-fast.sh
 ```
 
 What setup does:
@@ -57,10 +60,11 @@ What setup does:
 2. Creates `certs/` (a local CA and leaf certificate) if missing.
 3. Stores the Soniox key in Keychain under service `soniox-proxy`, account `SONIOX_API_KEY` (the proxy reads it from there; no key is written to the repo).
 4. Adds user trust for the local CA.
-5. Starts the proxy with `nohup` (or a LaunchAgent with `--launchd`).
+5. Starts the proxy as a LaunchAgent (or `nohup` without `--launchd`).
 6. Enables the Wi-Fi secure web proxy pointing at `127.0.0.1:8443`.
 7. With `--configure-app`, closes SuperWhisper, creates/activates the **Soniox Target** mode (`sw-deepgram-nova-3`, `realtimeOutput=true`), and relaunches it.
-8. With `--smoke`, runs the batch, pass-through, and realtime checks.
+8. `start-fast.sh` then updates both target modes and the current `1.5 s` Soniox/Scribe profile.
+9. With `--smoke`, runs the batch, pass-through, and realtime checks.
 
 Then in SuperWhisper select **Soniox Target** and dictate. The batch path and the realtime path should both use Soniox.
 
@@ -72,10 +76,9 @@ pnpm build
 bash scripts/gen-certs.sh                       # if certs are missing
 security add-generic-password -U -s soniox-proxy -a SONIOX_API_KEY -w "$SONIOX_API_KEY"
 security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db certs/ca.crt
-bash scripts/start.sh
 networksetup -setsecurewebproxy Wi-Fi 127.0.0.1 8443
 networksetup -setsecurewebproxystate Wi-Fi on
-bash scripts/configure-superwhisper-mode.sh
+bash scripts/start-fast.sh
 bash scripts/health.sh
 ```
 
@@ -85,7 +88,7 @@ bash scripts/health.sh
 bash scripts/install-launchd.sh
 ```
 
-The GitHub installer uses a **LaunchAgent by default**; it falls back to `nohup` if the agent cannot start. A local `scripts/setup.sh` run uses `nohup` unless you pass `--launchd`. The agent runs `/opt/homebrew/bin/node dist/src/index.js` from this directory, writes logs to `logs/`, and does **not** receive `SONIOX_API_KEY` in its environment; it reads Keychain. If Keychain access is blocked for a background agent, use `bash scripts/setup.sh` (nohup mode).
+The GitHub installer uses a **LaunchAgent by default**; it falls back to `nohup` if the agent cannot start. A local `scripts/setup.sh` run uses `nohup` unless you pass `--launchd`. The agent runs `/opt/homebrew/bin/node dist/src/index.js` from this directory, writes logs to `logs/`, and does **not** receive `SONIOX_API_KEY` in its environment; it reads Keychain. If Keychain access is blocked for a background agent, use `bash scripts/setup.sh` (nohup mode), then `bash scripts/start-fast.sh` to restore the fast profile.
 
 ## Verification
 
@@ -219,13 +222,21 @@ Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/h
 
 ### Fast auto profile
 
-`bash scripts/start-fast.sh` switches both **Soniox Target** and **Scribe Target** to `language=auto`, enables auto-paste, enables Scribe interception, and restarts the proxy with Soniox endpoint level `2`, sensitivity `0.3`, and max endpoint delay `1500 ms`. It also sets Scribe's VAD to `1.5 s` silence, threshold `0.4`, and `100 ms` minimum speech/silence. The script preserves each mode's other settings and updates an installed LaunchAgent plist so the profile survives login/reboot when that agent is used. A nohup-only setup applies until logout/reboot.
+`bash scripts/start-fast.sh` switches both **Soniox Target** and **Scribe Target** to `language=auto`, microphone input, auto-paste, enables Scribe interception, and restarts the proxy with Soniox endpoint level `2`, sensitivity `0.3`, and max endpoint delay `1500 ms`. It also sets Scribe's VAD to `1.5 s` silence, threshold `0.4`, and `100 ms` minimum speech/silence. The script preserves each mode's other settings and updates an installed LaunchAgent plist so the profile survives login/reboot when that agent is used. A nohup-only setup applies until logout/reboot.
 
 This is Soniox's documented lower-latency recommendation. Soniox's generic default is `2000 ms`; the active profile deliberately uses the recommended `1500 ms`. Scribe's default VAD silence is also `1.5 s`, so both paths finalize after the same silence target. Level `2` / sensitivity `0.3` can still split at short pauses; raise the max delay, lower the level, or disable endpointing if accuracy drops.
 
 The first partial still arrives after about **1.4-2.1 s**. That floor is Soniox's WebSocket handshake plus model processing, not a proxy setting. Scribe is faster, but its Russian quality is lower. The fast profile only shortens finalization at pauses; it does not remove the first-partial floor.
 
-Health now reports the active endpoint and Scribe VAD settings. Revert automatic language with `LANGUAGE=ru PRESERVE_MODE=1 bash scripts/configure-superwhisper-mode.sh` for each mode. If a LaunchAgent is installed, the fast endpoint values are also persisted in its plist; reinstall the conservative agent with `bash scripts/install-launchd.sh`, or delete `SONIOX_ENDPOINT_DETECTION`, `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL`, `SONIOX_ENDPOINT_SENSITIVITY`, `SONIOX_MAX_ENDPOINT_DELAY_MS`, `SCRIBE_VAD_TUNING`, and the `SCRIBE_*_DURATION_MS` / `SCRIBE_VAD_*` entries from `~/Library/LaunchAgents/com.superwhisper.soniox-proxy.plist` before restarting it.
+Health now reports the active endpoint and Scribe VAD settings. Revert automatic language with both commands, then reopen SuperWhisper:
+
+```bash
+LANGUAGE=ru MODE_KEY=soniox-target VOICE_MODEL_ID=sw-deepgram-nova-3 PRESERVE_MODE=1 NO_RESTART=1 bash scripts/configure-superwhisper-mode.sh
+LANGUAGE=ru MODE_KEY=scribe-target VOICE_MODEL_ID=sw-elevenlabs-scribe PRESERVE_MODE=1 NO_RESTART=1 bash scripts/configure-superwhisper-mode.sh
+open -a SuperWhisper
+```
+
+If a LaunchAgent is installed, the fast endpoint values are also persisted in its plist; reinstall the conservative agent with `bash scripts/install-launchd.sh`, or delete `SONIOX_ENDPOINT_DETECTION`, `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL`, `SONIOX_ENDPOINT_SENSITIVITY`, `SONIOX_MAX_ENDPOINT_DELAY_MS`, `SCRIBE_VAD_TUNING`, and the `SCRIBE_*_DURATION_MS` / `SCRIBE_VAD_*` entries from `~/Library/LaunchAgents/com.superwhisper.soniox-proxy.plist` before restarting it.
 
 If the Soniox WebSocket handshake takes longer than `SONIOX_PREFIX_BATCH_CONNECT_MS` (default 1200 ms), the audio queued during the handshake is transcribed with `stt-async-v6` instead of being burst into the realtime session. The realtime session then starts at the live edge. A burst would leave Soniox permanently behind live audio, and the app closes before the tail is finalized. The prefix tokens are prepended to the same transcript, with live token timestamps shifted by the prefix duration. Diagnostics record `prefix_batch_*` events and `prefix_missing_at_final` if the prefix is still pending at close.
 
@@ -250,7 +261,7 @@ A 42 s Russian smoke test delivered the final sentence before the app closed. Th
 - No audio, transcript text, `Authorization`, cookies, API keys, or query values for `keyterm`/`keywords`/`prompt` are logged. `redactQuery()` in `src/url-utils.ts` keeps protocol parameters and redacts user-specific ones.
 - Diagnostics under `~/Library/Caches/soniox-proxy/` contain only sizes, counts, timings, codes, and IDs; directory mode `700`, files `600`.
 - The Soniox key lives in Keychain. `certs/` and `logs/` are in `.gitignore`.
-- The local CA private key is mode `600`. Certificates are local-only and currently valid for 30 days (new runs default to 365/397 days); renew with `scripts/gen-certs.sh` and re-trust.
+- The local CA private key is mode `600`. Certificates are local-only and currently valid for 30 days (new runs default to 365/397 days); renew or rotate through `bash scripts/setup.sh --no-install --skip-proxy --launchd`, then `bash scripts/start-fast.sh`.
 - SuperWhisper is not modified. `codesign --verify --deep --strict /Applications/SuperWhisper.app` passes and SIP is enabled.
 
 ## Teardown
@@ -258,21 +269,21 @@ A 42 s Russian smoke test delivered the final sentence before the app closed. Th
 ```bash
 bash scripts/teardown.sh                 # stops proxy, disables system proxy, removes CA trust
 bash scripts/teardown.sh --remove-key    # also deletes the Soniox key from Keychain
-bash scripts/teardown.sh --remove-certs  # also deletes certs/
+bash scripts/teardown.sh --remove-certs  # deletes certs/ but keeps replacement fingerprints
 ```
 
-If the CA was installed in the System keychain, teardown prints the one `sudo` command needed to remove it. Certificates and the key are kept by default so setup can be re-run quickly.
+If the CA was installed in the System keychain, teardown prints the `sudo` commands needed to remove it. Certificates and the key are kept by default so setup can be re-run quickly.
 
 ## Troubleshooting
 
 | Symptom | Check |
 | --- | --- |
-| App says it cannot connect / TLS error | `bash scripts/health.sh`; re-run `scripts/setup.sh` and restart SuperWhisper after trust changes |
+| App says it cannot connect / TLS error | `bash scripts/health.sh`; re-run `scripts/setup.sh` then `scripts/start-fast.sh` after trust changes |
 | Batch works, realtime falls back to batch | `tail -f logs/proxy.log` for `soniox realtime connected`, `CloseStream`, `finished`; confirm active mode is `soniox-target` |
 | Realtime text looks truncated | Run `SMOKE_LONG=1 node scripts/smoke-realtime.mjs`; it must report `final_length >= max_interim_length` |
 | Periodic hang or cut at the end | `bash scripts/diagnostics.sh`; check `client_closed_before_final`, `close_to_finish_ms`, `close_text_length` vs `final_text_length` |
 | Pass-through broken | `bash scripts/smoke-passthrough.sh`; check `network`/DNS and the system proxy setting |
-| CA expired | `bash scripts/gen-certs.sh`, re-trust, restart the app |
+| CA expired | `bash scripts/setup.sh --no-install --skip-proxy --launchd`, then `bash scripts/start-fast.sh` (renews, re-trusts, and restores the profile) |
 | Port already in use | `lsof -nP -iTCP:8443 -sTCP:LISTEN`; stop the old proxy with `scripts/stop.sh` |
 
 ## Known limitations

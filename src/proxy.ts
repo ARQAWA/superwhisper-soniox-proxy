@@ -191,6 +191,7 @@ export function createRequestHandler(deps: ProxyDeps) {
         instance_id: runtime?.instanceId ?? "",
         scribe_enabled: config.SCRIBE_ENABLED,
         scribe_host: config.SCRIBE_HOST,
+        scribe_path: config.SCRIBE_PATH,
         scribe_model: config.SCRIBE_MODEL,
         scribe_voice_model_id: config.SCRIBE_VOICE_MODEL_ID,
         scribe_vad_tuning: config.SCRIBE_VAD_TUNING,

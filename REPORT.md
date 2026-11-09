@@ -115,7 +115,7 @@ Changes:
 
 Verification:
 
-- `pnpm test`: 29 passed; `pnpm build`: passed.
+- `pnpm test`: 27 passed; `pnpm build`: passed.
 - Short smoke: 85 chars / 11 words; long-with-2 s-pause smoke: 172 chars / 22 words; final length >= longest interim in both. The long smoke also requires a repeated normalized 6-word sequence and reports `repeated_phrase: true`, so both repetitions are present without printing transcript text.
 - The long trace records `endpoint_detection=true` and two `soniox_endpoint` events, so endpointing is active without changing the final text.
 - 22 s idle smoke with no app audio or app keepalive: two `keepalive_sent` events at 10.2 s and 10.0 s idle, then a complete 85-char / 11-word final. This proves the proxy keeps the Soniox stream alive past its 20 s audio timeout.
@@ -133,9 +133,9 @@ A direct Soniox test with the undocumented `max_non_final_tokens_duration_ms=360
 
 The selected recommendation profile is therefore:
 
-- Soniox Target with `language=auto`.
+- Soniox Target with `language=auto` and microphone input.
 - Endpoint level `2`, sensitivity `0.3`, max endpoint delay `1500 ms`.
-- Scribe Target with `language=auto` and matching VAD: `1.5 s` silence, threshold `0.4`, `100 ms` minimum speech/silence.
+- Scribe Target with `language=auto`, microphone input, and matching VAD: `1.5 s` silence, threshold `0.4`, `100 ms` minimum speech/silence.
 - First partial still around 1.4-2.1 s; this is the Soniox floor.
 - Scribe is faster but has lower Russian quality.
 
@@ -145,7 +145,25 @@ This is Soniox's documented lower-latency recommendation (`2` / `0.3` / `1500 ms
 
 An earlier 6.2 s Scribe audio check saved a result, but it contained only the second test phrase and ran on a build before effective-value logging; it verifies forwarding only, not a long-pause close-tail. A later Scribe handshake with the final build logged the effective `vad_silence_threshold_secs=1.5`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, and `min_silence_duration_ms=100`, and the upstream socket opened; no audio was sent, so it verifies the query rewrite, not audio forwarding.
 
-Verification after hardening: the launcher reported `fast profile is active and verified`; `/__health` returned `ws_mode=soniox`, `dry_run=false`, target host `api.deepgram.com`, target path `/v1/listen`, target model `nova-3`, target voice model `sw-deepgram-nova-3`, realtime query models `nova-2,nova-3`, MITM `true`, endpoint detection `true`, level `2`, sensitivity `0.3`, max delay `1500`, Scribe interception `true`, and Scribe VAD `1.5` / `0.4` / `100` / `100`; the listener PID matched the running proxy in both nohup and loaded-agent checks; the auto smoke produced 85 chars / 11 words; the installed LaunchAgent plist contains the same endpoint and Scribe values and no API key; `pnpm test` passed 29 tests and `pnpm build` passed.
+Verification after hardening: the launcher reported `fast profile is active and verified`; `/__health` returned `ws_mode=soniox`, `dry_run=false`, target host `api.deepgram.com`, target path `/v1/listen`, target model `nova-3`, target voice model `sw-deepgram-nova-3`, realtime query models `nova-2,nova-3`, MITM `true`, endpoint detection `true`, level `2`, sensitivity `0.3`, max delay `1500`, Scribe interception `true`, Scribe host `api.elevenlabs.io`, path `/v1/speech-to-text/realtime`, model `scribe_v2_realtime`, and Scribe VAD `1.5` / `0.4` / `100` / `100`; both modes have `language=auto`, `autoPaste=true`, and `useSystemAudio=false`; the listener PID matched the running proxy in both nohup and loaded-agent checks; the auto smoke produced 85 chars / 11 words; the installed LaunchAgent plist contains the same endpoint and Scribe values and no API key; `pnpm test` passed 29 tests and `pnpm build` passed.
+
+### Upgrade cleanup (2026-11-09)
+
+Old installs had two problems: the public installer updated tracked files but left the old `dist/` tree, and re-running `scripts/setup.sh` did not apply the current endpoint profile. An old install could therefore keep a stale compiled proxy and the conservative `2000 ms` defaults.
+
+The upgrade path now:
+
+- Resets the installed checkout to `main` before setup; a plain re-run from the installed checkout now takes this path automatically.
+- Removes `dist/` before installing locked dependencies and rebuilding.
+- Runs `start-fast.sh` after setup, so both modes and the current `1.5 s` profile are applied.
+- Updates existing target modes in place instead of overwriting their prompts and activation rules; both modes use microphone input and auto-paste.
+- Stops the old proxy/LaunchAgent through the hardened `stop.sh`, and refuses to overwrite an agent that belongs to another installation.
+- Preserves the original pre-install system-proxy state, migrates legacy unquoted state to base64 data, and corrects an older state file that recorded the proxy itself. Setup and teardown parse the state as data, never as shell code.
+- Refuses to switch `NETWORK_SERVICE` while a state file exists; run teardown first.
+- Rotates an expiring CA with `RENEW_CA=1`, removes only the replaced login-keychain root by SHA-1 fingerprint (including its user trust settings), and re-trusts the new one. Every replacement appends its old fingerprint and certificate for teardown; setup cleanup and teardown both replay the whole history so an interrupted renewal is completed on retry. Teardown keeps the history so failed removals can be retried. A pending `.ca-renewal-pending` marker survives retries, regenerates the leaf, and fails setup until the new/renewed root itself is trusted.
+- Prompts for the API key on `/dev/tty` when the installer is piped, without replacing the script's stdin.
+
+Manual checkouts use `git pull --ff-only`, `rm -rf dist`, `pnpm install --frozen-lockfile`, `bash scripts/setup.sh --no-install --skip-proxy --launchd` (to refresh certificates and trust), then `bash scripts/start-fast.sh`. The installer never deletes the Soniox key, diagnostics, or SuperWhisper recordings; it rotates certificates when the CA expires.
 
 ### Auto-paste regression (2026-11-09)
 
@@ -161,7 +179,7 @@ The fix is live-only: the proxy forwards partial and committed transcript messag
 
 Verification:
 
-- `pnpm test`: 29 tests passed.
+- `pnpm test`: 27 tests passed.
 - `pnpm build`: passed.
 - Scribe close logs record code and reason byte length only; passthrough and Soniox close logs do the same.
 - Other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited while Scribe is active.
@@ -218,7 +236,7 @@ Criterion 12 is limited by Soniox async processing latency, not by the proxy. Ba
 bash scripts/teardown.sh
 ```
 
-Stops the proxy/LaunchAgent, disables the secure web proxy (or restores the previous setting if it was captured by `setup.sh`), removes the local CA trust from the login keychain, and leaves certificates plus the Soniox key for a fast re-setup. Add `--remove-key` / `--remove-certs` to delete those too.
+Stops the proxy/LaunchAgent, disables the secure web proxy (or restores the previous setting if it was captured by `setup.sh`), removes the local CA trust from the login keychain, and leaves certificates plus the Soniox key for a fast re-setup. Add `--remove-key` / `--remove-certs` to delete those too; replacement fingerprint history is retained until those roots are removed, and CA certificates are kept while their user or admin trust still needs manual removal.
 
 ## Reproduce
 

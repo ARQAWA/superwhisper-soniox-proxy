@@ -22,7 +22,8 @@ The installer will:
 6. Trust the CA for your user (macOS may ask for confirmation).
 7. Build and start the proxy as a **LaunchAgent** (falls back to `nohup` if the agent cannot start).
 8. Point the **Wi-Fi secure web proxy** at `127.0.0.1:8443`.
-9. Create/activate the SuperWhisper **Soniox Target** mode.
+9. Create/activate the SuperWhisper **Soniox Target** and **Scribe Target** modes.
+10. Apply the current `1.5 s` Soniox/Scribe endpoint profile and restart the app.
 
 After it finishes, open SuperWhisper, select **Soniox Target**, and dictate.
 
@@ -43,7 +44,8 @@ curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/ma
 The key is never printed and is not written to the repository. To rotate the key later, run:
 
 ```bash
-SONIOX_API_KEY='new-key' bash ~/.local/share/superwhisper-soniox-proxy/scripts/setup.sh
+SONIOX_API_KEY='new-key' bash ~/.local/share/superwhisper-soniox-proxy/scripts/setup.sh --launchd
+bash ~/.local/share/superwhisper-soniox-proxy/scripts/start-fast.sh
 ```
 
 ## Requirements
@@ -81,18 +83,64 @@ node ~/.local/share/superwhisper-soniox-proxy/scripts/smoke-realtime.mjs
 
 The realtime smoke test prints only lengths and word counts, never the transcript.
 
+## Upgrade an old install
+
+Re-run the same one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh | bash
+```
+
+The upgrade path is intentionally clean:
+
+1. Stops the old proxy and the matching LaunchAgent.
+2. Resets the installed checkout to `main`.
+3. Removes the old `dist/` build so deleted files cannot survive.
+4. Installs the locked dependencies from the current `pnpm-lock.yaml`.
+5. Refreshes certificates, Keychain, proxy state, and LaunchAgent settings.
+6. Updates both SuperWhisper modes and applies the current `1.5 s` profile.
+7. Relaunches SuperWhisper.
+
+It keeps your Soniox key, diagnostic traces, and SuperWhisper recordings, and keeps local certificates unless the CA is expiring. It does not touch unrelated LaunchAgents or apps.
+
+For a manual checkout:
+
+```bash
+git pull --ff-only
+rm -rf dist
+pnpm install --frozen-lockfile
+bash scripts/setup.sh --no-install --skip-proxy --launchd
+bash scripts/start-fast.sh
+```
+
+Do **not** keep running an old `nohup` proxy. `scripts/start-fast.sh` stops the matching proxy and restarts the current build.
+
 ## Update
 
-```bash
-bash ~/.local/share/superwhisper-soniox-proxy/install.sh
-```
-
-or:
+Preferred, from the public installer:
 
 ```bash
-git -C ~/.local/share/superwhisper-soniox-proxy pull
-bash ~/.local/share/superwhisper-soniox-proxy/scripts/setup.sh
+curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh | bash
 ```
+
+Old installed checkouts need the current installer first, because the old script does not know `--upgrade`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh
+bash /tmp/install.sh --upgrade
+```
+
+From a manual development checkout:
+
+```bash
+git pull --ff-only
+rm -rf dist
+pnpm install --frozen-lockfile
+bash scripts/setup.sh --no-install --skip-proxy --launchd
+bash scripts/start-fast.sh
+```
+
+Re-running the installer, or `install.sh --upgrade`, is the supported upgrade path. Do not run the old `scripts/setup.sh` alone: it does not remove the previous build or apply the current endpoint profile.
 
 ## Uninstall
 
@@ -100,9 +148,9 @@ bash ~/.local/share/superwhisper-soniox-proxy/scripts/setup.sh
 bash ~/.local/share/superwhisper-soniox-proxy/scripts/teardown.sh
 ```
 
-Add `--remove-key` to delete the Soniox key and `--remove-certs` to delete the local certificates.
+Add `--remove-key` to delete the Soniox key and `--remove-certs` to delete the local certificates; replacement fingerprint history is kept until those roots are removed, and CA certificates are kept while their user or admin trust still needs manual removal.
 
-If the CA was also trusted in the System keychain, the script prints the one `sudo` command needed to remove it.
+If the CA was also trusted in the System keychain, the script prints the `sudo` commands needed to remove it.
 
 ## Troubleshooting
 
@@ -111,11 +159,11 @@ If the CA was also trusted in the System keychain, the script prints the one `su
 | `install.sh: permission denied` | Run `bash /tmp/install.sh`, not `./install.sh`, or `chmod +x install.sh`. |
 | Installer cannot prompt for the key | Download and run the script directly instead of piping it: `curl -o /tmp/install.sh ... && bash /tmp/install.sh`. |
 | SuperWhisper does not trust the proxy | Run `bash scripts/health.sh`, approve the macOS certificate dialog, then quit/reopen SuperWhisper. |
-| LaunchAgent does not become healthy | Run `bash scripts/setup.sh` (nohup mode) or inspect `logs/proxy.stderr.log`. |
+| LaunchAgent does not become healthy | Run `bash scripts/setup.sh` (nohup mode), then `bash scripts/start-fast.sh` to restore the profile; inspect `logs/proxy.stderr.log`. |
 | Realtime falls back to batch | Check `logs/proxy.log` for `soniox realtime connected` / `CloseStream`; confirm the active mode is `soniox-target`. |
 | Realtime hangs or cuts the end | Run `bash scripts/diagnostics.sh`; review `client_closed_before_final` and `close_to_finish_ms` in `~/Library/Caches/soniox-proxy/diagnostics/`. |
 | Batch is slow | Soniox async processing p95 is around 4 s; realtime dictation avoids it. |
-| CA expired | Run `bash scripts/gen-certs.sh`, re-trust, restart SuperWhisper. |
+| CA expired | Run `bash scripts/setup.sh --no-install --skip-proxy --launchd`, then `bash scripts/start-fast.sh` (renews, re-trusts, and restores the profile). |
 
 ## Manual install from a clone
 
@@ -123,7 +171,10 @@ If the CA was also trusted in the System keychain, the script prints the one `su
 git clone https://github.com/ARQAWA/superwhisper-soniox-proxy.git
 cd superwhisper-soniox-proxy
 export SONIOX_API_KEY='...'
-bash scripts/setup.sh --configure-app --smoke
+bash scripts/setup.sh --launchd --configure-app
+bash scripts/start-fast.sh
 ```
+
+Add `--smoke` to `setup.sh` to run the batch, pass-through, and realtime checks.
 
 See `README.md` for architecture and configuration, `docs/recon.md` for the observed wire contracts, and `REPORT.md` for verification results.

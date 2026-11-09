@@ -34,16 +34,18 @@ configure_mode() {
     bash scripts/configure-superwhisper-mode.sh
 }
 
-# The LaunchAgent runs dist/src/index.js; build before stopping the old proxy.
+# The LaunchAgent runs dist/src/index.js. Remove the old compiled tree first so
+# files deleted in a previous version cannot survive the upgrade.
+rm -rf "$ROOT/dist"
 pnpm build
 
 configure_mode "$SCRIBE_MODE_KEY" "Scribe Target" sw-elevenlabs-scribe
 configure_mode "$MODE_KEY" "Soniox Target" sw-deepgram-nova-3
 
 for mode_path in "$SCRIBE_MODE_PATH" "$MODE_PATH"; do
-  if ! jq -e '.language == "auto" and .realtimeOutput == true and .diarize == false and .autoPaste == true' \
+  if ! jq -e '.language == "auto" and .realtimeOutput == true and .diarize == false and .autoPaste == true and .useSystemAudio == false' \
     "$mode_path" >/dev/null; then
-    printf 'mode must use language=auto, realtime output, diarize=false, and autoPaste=true: %s\n' "$mode_path" >&2
+    printf 'mode must use language=auto, realtime output, diarize=false, autoPaste=true, and the microphone (useSystemAudio=false): %s\n' "$mode_path" >&2
     exit 1
   fi
 done
@@ -68,6 +70,10 @@ export SONIOX_ENDPOINT_SENSITIVITY=0.3
 export SONIOX_MAX_ENDPOINT_DELAY_MS=1500
 export SCRIBE_VAD_TUNING=true
 export SCRIBE_ENABLED=true
+export SCRIBE_HOST=api.elevenlabs.io
+export SCRIBE_PATH=/v1/speech-to-text/realtime
+export SCRIBE_MODEL=scribe_v2_realtime
+export SCRIBE_VOICE_MODEL_ID=sw-elevenlabs-scribe
 export SCRIBE_VAD_SILENCE_THRESHOLD_SECS=1.5
 export SCRIBE_VAD_THRESHOLD=0.4
 export SCRIBE_MIN_SPEECH_DURATION_MS=100
@@ -104,6 +110,10 @@ if [ -f "$LAUNCHD_PLIST" ]; then
   plist_set_env SONIOX_MAX_ENDPOINT_DELAY_MS 1500
   plist_set_env SCRIBE_VAD_TUNING true
   plist_set_env SCRIBE_ENABLED true
+  plist_set_env SCRIBE_HOST api.elevenlabs.io
+  plist_set_env SCRIBE_PATH /v1/speech-to-text/realtime
+  plist_set_env SCRIBE_MODEL scribe_v2_realtime
+  plist_set_env SCRIBE_VOICE_MODEL_ID sw-elevenlabs-scribe
   plist_set_env SCRIBE_VAD_SILENCE_THRESHOLD_SECS 1.5
   plist_set_env SCRIBE_VAD_THRESHOLD 0.4
   plist_set_env SCRIBE_MIN_SPEECH_DURATION_MS 100
@@ -146,6 +156,10 @@ profile_health_ok() {
     and .soniox_max_endpoint_delay_ms == 1500
     and .scribe_vad_tuning == true
     and .scribe_enabled == true
+    and .scribe_host == "api.elevenlabs.io"
+    and .scribe_path == "/v1/speech-to-text/realtime"
+    and .scribe_model == "scribe_v2_realtime"
+    and .scribe_voice_model_id == "sw-elevenlabs-scribe"
     and .scribe_vad_silence_threshold_secs == 1.5
     and .scribe_vad_threshold == 0.4
     and .scribe_min_speech_duration_ms == 100

@@ -16,6 +16,8 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/superwhisper-soniox-proxy}"
 USE_LAUNCHD=1
 RUN_SMOKE=0
 CONFIGURE_APP=1
+REMOTE_INSTALL=0
+FORCE_UPGRADE=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -27,7 +29,8 @@ Usage: install.sh [options]
 Options:
   --no-launchd        Use nohup instead of a LaunchAgent (not persistent across reboots).
   --smoke             Run batch, pass-through, and realtime smoke tests after setup.
-  --no-configure-app  Do not create/activate the SuperWhisper "Soniox Target" mode.
+  --no-configure-app  Do not create/activate the SuperWhisper modes.
+  --upgrade           Force an update of the installed checkout even when run from it.
   -h, --help          Show this help.
 
 Environment:
@@ -44,6 +47,7 @@ for arg in "$@"; do
     --no-launchd) USE_LAUNCHD=0 ;;
     --smoke) RUN_SMOKE=1 ;;
     --no-configure-app) CONFIGURE_APP=0 ;;
+    --upgrade) FORCE_UPGRADE=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $arg (try --help)" ;;
   esac
@@ -51,10 +55,32 @@ done
 
 [ "$(id -u)" -eq 0 ] && die "run this as your normal macOS user, not with sudo/root"
 
+# If this script is the installed checkout's own installer, treat a plain
+# re-run as an upgrade. Do this before the self-update re-exec so a reset cannot
+# change the running script.
+script_source="${BASH_SOURCE[0]:-}"
+auto_upgrade=0
+if [ -n "$script_source" ] && [ -f "$script_source" ]; then
+  source_dir="$(cd "$(dirname "$script_source")" && pwd)"
+  install_dir="$(cd "$INSTALL_DIR" 2>/dev/null && pwd || true)"
+  if [ -n "$install_dir" ] && [ "$source_dir" = "$install_dir" ]; then
+    auto_upgrade=1
+  fi
+fi
+if [ "$auto_upgrade" = "1" ] && [ "$FORCE_UPGRADE" != "1" ]; then
+  set -- "$@" --upgrade
+  FORCE_UPGRADE=1
+fi
+
+# --upgrade may reset the checkout that contains this script. Re-exec from the
+# already-open file descriptor so git reset cannot change the running script.
+if [ "$FORCE_UPGRADE" = "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
+  exec bash -s -- "$@" <"$script_source"
+fi
+
 # If this script is part of a local checkout, install from that checkout.
 ROOT=""
-script_source="${BASH_SOURCE[0]:-}"
-if [ -n "$script_source" ] && [ -f "$script_source" ]; then
+if [ "$FORCE_UPGRADE" != "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
   candidate="$(cd "$(dirname "$script_source")" && pwd)"
   if [ -f "$candidate/package.json" ] && [ -d "$candidate/src" ]; then
     ROOT="$candidate"
@@ -67,13 +93,14 @@ if [ -z "$ROOT" ]; then
   if [ -d "$INSTALL_DIR/.git" ]; then
     say "updating $INSTALL_DIR"
     git -C "$INSTALL_DIR" fetch --depth 1 origin "$BRANCH"
-    git -C "$INSTALL_DIR" checkout -q "$BRANCH"
+    git -C "$INSTALL_DIR" checkout -q -f -B "$BRANCH" "origin/$BRANCH"
     git -C "$INSTALL_DIR" reset --hard -q "origin/$BRANCH"
   else
     say "cloning $REPO_URL"
     git clone --depth 1 --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
   fi
   ROOT="$INSTALL_DIR"
+  REMOTE_INSTALL=1
 fi
 cd "$ROOT"
 
@@ -117,10 +144,30 @@ command -v curl >/dev/null 2>&1 || die "curl is required"
 command -v security >/dev/null 2>&1 || die "macOS security tool is required"
 command -v networksetup >/dev/null 2>&1 || die "macOS networksetup tool is required"
 
-# When the installer itself is piped from curl, stdin is the script. Reopen the
-# terminal so setup can prompt for the Soniox key and macOS can show auth dialogs.
-if [ -z "${SONIOX_API_KEY:-}" ] && [ ! -t 0 ] && [ -r /dev/tty ]; then
-  exec </dev/tty
+if [ "$REMOTE_INSTALL" = "1" ]; then
+  say "upgrading existing checkout: cleaning old build and installing locked dependencies"
+  rm -rf "$ROOT/dist"
+  (cd "$ROOT" && pnpm install --frozen-lockfile)
+fi
+
+# When the installer is piped from curl, stdin is the script. Prompt on the
+# terminal explicitly and export the key; never replace the script input.
+if [ -z "${SONIOX_API_KEY:-}" ] && [ ! -t 0 ]; then
+  if ! security find-generic-password -s soniox-proxy -a SONIOX_API_KEY >/dev/null 2>&1; then
+    if [ ! -r /dev/tty ]; then
+      die "SONIOX_API_KEY is not set and no terminal is available"
+    fi
+    printf 'Soniox API key (input hidden): ' >/dev/tty
+    if ! IFS= read -rsp '' key </dev/tty; then
+      die "could not read the Soniox API key"
+    fi
+    printf '\n' >/dev/tty
+    if [ -z "$key" ]; then
+      die "empty Soniox API key"
+    fi
+    export SONIOX_API_KEY="$key"
+    unset key
+  fi
 fi
 
 if [ "$CONFIGURE_APP" = "1" ] && [ ! -d /Applications/SuperWhisper.app ]; then
@@ -132,7 +179,6 @@ fi
 
 setup_args=()
 [ "$USE_LAUNCHD" = "1" ] && setup_args+=(--launchd)
-[ "$CONFIGURE_APP" = "1" ] && setup_args+=(--configure-app)
 [ "$RUN_SMOKE" = "1" ] && setup_args+=(--smoke)
 
 say "installing from $ROOT"
@@ -140,11 +186,17 @@ if ! bash scripts/setup.sh "${setup_args[@]}"; then
   if [ "$USE_LAUNCHD" = "1" ]; then
     say "LaunchAgent setup failed; falling back to nohup mode."
     fallback_args=()
-    [ "$CONFIGURE_APP" = "1" ] && fallback_args+=(--configure-app)
     [ "$RUN_SMOKE" = "1" ] && fallback_args+=(--smoke)
     bash scripts/setup.sh "${fallback_args[@]}"
   else
     exit 1
+  fi
+fi
+
+if [ "$CONFIGURE_APP" = "1" ]; then
+  say "applying the current Soniox and Scribe profile"
+  if ! (cd "$ROOT" && bash scripts/start-fast.sh); then
+    die "proxy setup succeeded, but the current profile failed to apply. Run: bash $ROOT/scripts/start-fast.sh"
   fi
 fi
 
@@ -153,6 +205,6 @@ say "installed at: $ROOT"
 say "health:       bash \"$ROOT/scripts/health.sh\""
 say "logs:         \"$ROOT/logs/proxy.log\""
 say "uninstall:    bash \"$ROOT/scripts/teardown.sh\""
-say "update:       re-run this installer, or: git -C \"$ROOT\" pull && bash \"$ROOT/scripts/setup.sh\""
+say "update:       re-run this installer (resets the checkout, cleans old dist, applies the current profile)"
 say ""
 say "Open SuperWhisper and select the \"Soniox Target\" mode, then dictate."

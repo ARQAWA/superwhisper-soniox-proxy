@@ -15,7 +15,19 @@ if [ ! -f "$template" ]; then
   exit 1
 fi
 
-(cd "$ROOT" && bash scripts/stop.sh >/dev/null 2>&1 || true)
+if [ -f "$LAUNCHD_PLIST" ] && ! plist_targets_this_install; then
+  printf 'refusing to overwrite a LaunchAgent for a different installation: %s\n' "$LAUNCHD_PLIST" >&2
+  exit 1
+fi
+if launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 && ! launchctl_service_is_this_install; then
+  printf 'refusing to replace a loaded LaunchAgent for a different installation: %s\n' "$LAUNCHD_LABEL" >&2
+  exit 1
+fi
+
+if ! (cd "$ROOT" && bash scripts/stop.sh); then
+  printf 'could not stop the previous proxy cleanly\n' >&2
+  exit 1
+fi
 
 node_path="$(command -v node)"
 sed \

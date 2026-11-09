@@ -68,18 +68,126 @@ if [ ! -f "$ROOT/node_modules/.modules.yaml" ]; then
 fi
 
 printf 'certificates\n'
-if [ ! -f "$CA_CRT" ] || [ ! -f "$LEAF_CRT" ] || [ ! -f "$CERT_DIR/leaf.key" ]; then
+mkdir -p "$CERT_DIR"
+CA_RENEWAL_FLAG="$CERT_DIR/.ca-renewal-pending"
+CA_OLD_HASH_FILE="$CERT_DIR/.ca-renewal-old-hash"
+CA_OLD_HASH=""
+CA_CLEANUP_PENDING=0
+login_cert_present() {
+  local listing
+  if ! listing="$(security find-certificate -a -Z "$HOME/Library/Keychains/login.keychain-db" 2>/dev/null)"; then
+    return 2
+  fi
+  if printf '%s' "$listing" | grep -qi "SHA-1 hash: $1"; then
+    return 0
+  fi
+  return 1
+}
+
+cleanup_login_cert() {
+  local hash="$1" state
+  login_cert_present "$hash" && state=0 || state=$?
+  case "$state" in
+    0)
+      if ! security_timeout delete-certificate -t -Z "$hash" "$HOME/Library/Keychains/login.keychain-db" \
+        >/dev/null 2>&1; then
+        CA_CLEANUP_PENDING=1
+      fi
+      ;;
+    2)
+      CA_CLEANUP_PENDING=1
+      ;;
+  esac
+}
+CA_RENEWED=0
+CA_RENEW_NOW=0
+CA_LEAF_RENEW=0
+CA_KEY="$CERT_DIR/ca.key"
+if [ -f "$CA_RENEWAL_FLAG" ]; then
+  CA_RENEWED=1
+  CA_LEAF_RENEW=1
+fi
+if [ -f "$CA_CRT" ]; then
+  if ! openssl x509 -in "$CA_CRT" -noout >/dev/null 2>&1; then
+    printf '  CA certificate is invalid; regenerating\n'
+    CA_RENEWED=1
+    CA_RENEW_NOW=1
+    : >"$CA_RENEWAL_FLAG"
+  elif [ ! -f "$CA_KEY" ]; then
+    printf '  CA private key is missing; regenerating root\n'
+    CA_RENEWED=1
+    CA_RENEW_NOW=1
+    : >"$CA_RENEWAL_FLAG"
+  elif ! openssl rsa -in "$CA_KEY" -check -noout >/dev/null 2>&1; then
+    printf '  CA private key is corrupt; regenerating root\n'
+    CA_RENEWED=1
+    CA_RENEW_NOW=1
+    : >"$CA_RENEWAL_FLAG"
+  elif ! openssl x509 -in "$CA_CRT" -noout -text 2>/dev/null \
+    | sed -n '/Basic Constraints/,+2p' | grep -q 'CA:TRUE'; then
+    printf '  CA certificate is not a valid signing root; regenerating\n'
+    CA_RENEWED=1
+    CA_RENEW_NOW=1
+    : >"$CA_RENEWAL_FLAG"
+  elif [ "$(openssl x509 -in "$CA_CRT" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/^subject= *//' || true)" != "$(openssl x509 -in "$CA_CRT" -noout -issuer -nameopt RFC2253 2>/dev/null | sed 's/^issuer= *//' || true)" ] \
+    || ! openssl verify -check_ss_sig -CAfile "$CA_CRT" "$CA_CRT" >/dev/null 2>&1; then
+    printf '  CA certificate is not self-signed or self-verifying; regenerating\n'
+    CA_RENEWED=1
+    CA_RENEW_NOW=1
+    : >"$CA_RENEWAL_FLAG"
+  else
+    crt_pub="$(openssl x509 -in "$CA_CRT" -noout -pubkey 2>/dev/null || true)"
+    key_pub="$(openssl pkey -in "$CA_KEY" -pubout 2>/dev/null || true)"
+    if [ -z "$crt_pub" ] || [ "$crt_pub" != "$key_pub" ]; then
+      printf '  CA certificate and key do not match; regenerating root\n'
+      CA_RENEWED=1
+      CA_RENEW_NOW=1
+      : >"$CA_RENEWAL_FLAG"
+    else
+      days="$(ca_days_left)"
+      if [ "$days" != "unknown" ] && [ "$days" -lt 7 ]; then
+        printf '  CA expires in %s days; renewing CA and leaf\n' "$days"
+        CA_RENEWED=1
+        CA_RENEW_NOW=1
+        : >"$CA_RENEWAL_FLAG"
+      fi
+    fi
+  fi
+else
+  printf '  CA certificate is missing; generating a new root\n'
+  CA_RENEWED=1
+  : >"$CA_RENEWAL_FLAG"
+fi
+if [ "$CA_RENEW_NOW" = "1" ]; then
+  if [ -z "$CA_OLD_HASH" ] && [ -f "$CA_CRT" ]; then
+    CA_OLD_HASH="$(openssl x509 -in "$CA_CRT" -noout -fingerprint -sha1 2>/dev/null \
+      | sed 's/^.*=//; s/://g' || true)"
+  fi
+  (cd "$ROOT" && RENEW_CA=1 bash scripts/gen-certs.sh)
+elif [ "$CA_LEAF_RENEW" = "1" ]; then
+  printf '  resuming leaf renewal against the current CA\n'
+  (cd "$ROOT" && bash scripts/gen-certs.sh)
+elif [ ! -f "$CA_CRT" ] || [ ! -f "$LEAF_CRT" ] || [ ! -f "$CERT_DIR/leaf.key" ]; then
   (cd "$ROOT" && bash scripts/gen-certs.sh)
 else
   printf '  using existing %s\n' "$CA_CRT"
-  if ! openssl x509 -in "$LEAF_CRT" -noout -ext subjectAltName 2>/dev/null | grep -q "api.elevenlabs.io"; then
+  if ! openssl x509 -in "$LEAF_CRT" -noout -text 2>/dev/null | grep -q "api.elevenlabs.io"; then
     printf '  leaf certificate lacks api.elevenlabs.io; renewing\n'
     (cd "$ROOT" && bash scripts/gen-certs.sh)
   fi
-  days="$(ca_days_left)"
-  if [ "$days" != "unknown" ] && [ "$days" -lt 7 ]; then
-    printf '  CA expires in %s days; renewing certificates\n' "$days"
-    (cd "$ROOT" && bash scripts/gen-certs.sh)
+fi
+
+if [ "$CA_RENEWED" = "1" ]; then
+  if [ -n "$CA_OLD_HASH" ]; then
+    cleanup_login_cert "$CA_OLD_HASH"
+  fi
+  if [ -f "$CA_OLD_HASH_FILE" ]; then
+    while IFS= read -r old_hash; do
+      if [ -z "$old_hash" ] || [ "$old_hash" = "$CA_OLD_HASH" ]; then
+        continue
+      fi
+      cleanup_login_cert "$old_hash"
+    done <"$CA_OLD_HASH_FILE"
   fi
 fi
 
@@ -106,15 +214,44 @@ else
 fi
 
 printf 'certificate trust\n'
-if ca_in_login_keychain || trust_settings_has_ca || ca_chain_verifies; then
+need_trust=0
+if [ "$CA_RENEWED" = "1" ]; then
+  if ca_root_trusted && ca_chain_verifies; then
+    printf '  renewed CA is already trusted\n'
+  else
+    need_trust=1
+  fi
+elif ca_in_login_keychain || trust_settings_has_ca || ca_chain_verifies; then
   printf '  CA is already present and trusted\n'
 else
+  need_trust=1
+fi
+if [ "$need_trust" = "1" ]; then
   # User-domain trust does not require sudo. The app runs as this user.
   if security add-trusted-cert -r trustRoot -k "$HOME/Library/Keychains/login.keychain-db" "$CA_CRT" >/dev/null 2>&1; then
-    printf '  CA imported into the login keychain with user trust\n'
+    if [ "$CA_RENEWED" = "1" ]; then
+      printf '  renewed CA imported into the login keychain with user trust\n'
+    else
+      printf '  CA imported into the login keychain with user trust\n'
+    fi
   else
+    if [ "$CA_RENEWED" = "1" ]; then
+      printf '  renewed CA trust failed; run: security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n' "$CA_CRT" >&2
+      exit 1
+    fi
     printf '  warning: could not add user trust automatically\n' >&2
     printf '  run: security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db %s\n' "$CA_CRT" >&2
+  fi
+fi
+if [ "$CA_RENEWED" = "1" ]; then
+  if ! ca_root_trusted || ! ca_chain_verifies; then
+    printf '  renewed CA is not effectively trusted or does not verify the leaf\n' >&2
+    exit 1
+  fi
+  if [ "$CA_CLEANUP_PENDING" = "1" ]; then
+    printf '  replaced-root cleanup incomplete; keeping the renewal marker for the next setup\n' >&2
+  else
+    rm -f "$CA_RENEWAL_FLAG"
   fi
 fi
 
@@ -122,7 +259,10 @@ printf 'build\n'
 (cd "$ROOT" && pnpm build)
 
 printf 'proxy\n'
-(cd "$ROOT" && bash scripts/stop.sh >/dev/null 2>&1 || true)
+if ! (cd "$ROOT" && bash scripts/stop.sh); then
+  printf 'could not stop the previous proxy cleanly; refusing to overwrite its service\n' >&2
+  exit 1
+fi
 if [ "$USE_LAUNCHD" = "1" ]; then
   (cd "$ROOT" && bash scripts/install-launchd.sh)
 else
@@ -131,7 +271,7 @@ fi
 
 if [ "$CONFIGURE_APP" = "1" ]; then
   printf 'SuperWhisper mode\n'
-  if ! (cd "$ROOT" && bash scripts/configure-superwhisper-mode.sh); then
+  if ! (cd "$ROOT" && PRESERVE_MODE=1 bash scripts/configure-superwhisper-mode.sh); then
     printf 'warning: could not create/activate the SuperWhisper mode.\n' >&2
     printf 'Run manually: bash %s/scripts/configure-superwhisper-mode.sh\n' "$ROOT" >&2
   fi
@@ -144,14 +284,76 @@ if [ "$SKIP_PROXY" = "0" ]; then
   previous_enabled="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
   previous_server="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Server:/{print $2}')"
   previous_port="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Port:/{print $2}')"
-  {
-    printf 'SETUP_AT=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-    printf 'NETWORK_SERVICE=%s\n' "$NETWORK_SERVICE"
-    printf 'PREVIOUS_ENABLED=%s\n' "${previous_enabled:-No}"
-    printf 'PREVIOUS_SERVER=%s\n' "${previous_server:-}"
-    printf 'PREVIOUS_PORT=%s\n' "${previous_port:-0}"
-    printf 'LAUNCHD=%s\n' "$USE_LAUNCHD"
-  } >"$STATE_FILE"
+  encode_state_value() {
+    printf '%s' "$1" | base64 | tr -d '\n'
+  }
+  state_is_stale=0
+  if [ -f "$STATE_FILE" ]; then
+    state_raw() {
+      sed -n "s/^$1=//p" "$STATE_FILE" | head -n 1
+    }
+    decode_state_value() {
+      local value="$1"
+      printf '%s' "$value"
+    }
+    state_read() {
+      local encoded
+      encoded="$(state_raw "${1}_B64")"
+      if [ -n "$encoded" ]; then
+        printf '%s' "$encoded" | base64 -D 2>/dev/null
+        return
+      fi
+      decode_state_value "$(state_raw "$1")"
+    }
+    state_service="$(state_read NETWORK_SERVICE)"
+    if [ -n "$state_service" ] && [ "$state_service" != "$NETWORK_SERVICE" ]; then
+      printf 'refusing to change network service from %s to %s; run teardown first\n' \
+        "$state_service" "$NETWORK_SERVICE" >&2
+      exit 1
+    fi
+    state_enabled="$(state_read PREVIOUS_ENABLED)"
+    state_server="$(state_read PREVIOUS_SERVER)"
+    state_port="$(state_read PREVIOUS_PORT)"
+    state_setup_at="$(state_read SETUP_AT)"
+    state_launchd="$(state_read LAUNCHD)"
+    if [ "$state_enabled" = "Yes" ] && [ "$state_server" = "$PROXY_HOST" ] && [ "$state_port" = "$PROXY_PORT" ]; then
+      # An older setup rerun recorded our own proxy as the previous proxy.
+      # Preserve the original state if it is sane; otherwise record "disabled"
+      # so teardown does not restore the proxy it is removing.
+      state_is_stale=1
+      printf '  correcting stale proxy state: %s\n' "$STATE_FILE"
+    else
+      # Re-running setup or upgrading must not replace the original
+      # pre-install proxy with our own proxy. Rewrite as base64 data so a
+      # service name containing spaces or quotes round-trips exactly.
+      {
+        printf 'SETUP_AT_B64=%s\n' "$(encode_state_value "$state_setup_at")"
+        printf 'NETWORK_SERVICE_B64=%s\n' "$(encode_state_value "$state_service")"
+        printf 'PREVIOUS_ENABLED_B64=%s\n' "$(encode_state_value "$state_enabled")"
+        printf 'PREVIOUS_SERVER_B64=%s\n' "$(encode_state_value "$state_server")"
+        printf 'PREVIOUS_PORT_B64=%s\n' "$(encode_state_value "$state_port")"
+        printf 'LAUNCHD_B64=%s\n' "$(encode_state_value "$state_launchd")"
+      } >"$STATE_FILE.migrate.$$"
+      mv "$STATE_FILE.migrate.$$" "$STATE_FILE"
+      printf '  preserving original proxy state: %s\n' "$STATE_FILE"
+    fi
+  fi
+  if [ ! -f "$STATE_FILE" ] || [ "$state_is_stale" = "1" ]; then
+    if [ "$previous_enabled" = "Yes" ] && [ "$previous_server" = "$PROXY_HOST" ] && [ "$previous_port" = "$PROXY_PORT" ]; then
+      # An older install may have set the proxy without recording its origin.
+      previous_enabled=No
+      previous_server=""
+      previous_port=0
+    fi
+    {
+      printf 'SETUP_AT_B64=%s\n' "$(encode_state_value "$(date -u '+%Y-%m-%dT%H:%M:%SZ')")"
+      printf 'NETWORK_SERVICE_B64=%s\n' "$(encode_state_value "$NETWORK_SERVICE")"
+      printf 'PREVIOUS_ENABLED_B64=%s\n' "$(encode_state_value "${previous_enabled:-No}")"
+      printf 'PREVIOUS_SERVER_B64=%s\n' "$(encode_state_value "${previous_server:-}")"
+      printf 'PREVIOUS_PORT_B64=%s\n' "$(encode_state_value "${previous_port:-0}")"
+      printf 'LAUNCHD_B64=%s\n' "$(encode_state_value "$USE_LAUNCHD")"
+    } >"$STATE_FILE"
+  fi
   networksetup -setsecurewebproxy "$NETWORK_SERVICE" "$PROXY_HOST" "$PROXY_PORT"
   networksetup -setsecurewebproxystate "$NETWORK_SERVICE" on
   printf '  %s secure proxy -> %s:%s\n' "$NETWORK_SERVICE" "$PROXY_HOST" "$PROXY_PORT"

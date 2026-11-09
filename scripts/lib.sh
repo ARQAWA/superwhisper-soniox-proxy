@@ -29,6 +29,25 @@ require_cmd() {
   }
 }
 
+security_timeout() {
+  local timeout_bin=""
+  if command -v timeout >/dev/null 2>&1; then
+    timeout_bin="$(command -v timeout)"
+  elif [ -x /opt/homebrew/bin/timeout ]; then
+    timeout_bin="/opt/homebrew/bin/timeout"
+  elif [ -x /usr/bin/timeout ]; then
+    timeout_bin="/usr/bin/timeout"
+  fi
+  if [ -n "$timeout_bin" ]; then
+    "$timeout_bin" 8 security "$@"
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm 8; exec @ARGV' security "$@"
+  else
+    printf 'skipping interactive security command (no timeout tool): security %s\n' "$*" >&2
+    return 1
+  fi
+}
+
 proxy_health_json() {
   curl -fsS --max-time 3 "$HEALTH_URL" 2>/dev/null
 }
@@ -68,11 +87,10 @@ health_is_proxy() {
     return
   fi
 
-  # Pre-change proxies have neither identity field. Accept only the process
-  # recorded in this installation's PID file, owning the IPv4 health listener,
-  # with the exact target fields. Never use this path for escalation.
+  # Pre-change proxies have neither identity field. Accept only a process
+  # owning the IPv4 health listener from this installation with the exact
+  # target fields. Never use this path for escalation.
   [ -z "$expected_instance" ] || return 1
-  [ "$(proxy_pid)" = "$pid" ] || return 1
   pid_owns_listener "$pid" || return 1
   pid_cwd_is_root "$pid" || return 1
   printf '%s' "$health" | jq -e '
@@ -162,6 +180,10 @@ trust_settings_has_ca() {
 
 ca_chain_verifies() {
   [ -f "$LEAF_CRT" ] && security verify-cert -c "$LEAF_CRT" -p ssl >/dev/null 2>&1
+}
+
+ca_root_trusted() {
+  [ -f "$CA_CRT" ] && security verify-cert -c "$CA_CRT" -p ssl >/dev/null 2>&1
 }
 
 ca_days_left() {
