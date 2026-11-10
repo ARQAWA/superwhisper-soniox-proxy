@@ -3,6 +3,10 @@
 Date: 2026-11-07
 Environment: macOS, SuperWhisper 3.2.1, Node.js 26.7.0, Soniox `stt-async-v6` / `stt-rt-v6`
 
+> **2026-11-10 update:** app configuration and mode detection were removed. The
+> installer and proxy never read or modify SuperWhisper. Sections below that
+> mention mode files or app defaults are historical recon, not current behavior.
+
 > **2026-11-09 update:** the current install uses a PAC allowlist, Soniox provider defaults, and a `1 s` Scribe VAD. Measurements and health values below are historical evidence from the rounds that produced them.
 
 ## Summary
@@ -22,7 +26,7 @@ The proxy is selected by a macOS PAC file (`127.0.0.1:8443/proxy.pac`) that rout
 | Token merger | `src/tokens.ts` | Joins Soniox subwords into whole words; shared by batch/realtime |
 | Query redaction | `src/url-utils.ts` | Keeps protocol parameters, hides user-specific values |
 | Multipart parser | `src/multipart.ts` | Handles multipart pass-through/target requests |
-| Scripts | `scripts/` | Setup, teardown, health, smoke tests, app mode, launchd |
+| Scripts | `scripts/` | Setup, teardown, health, smoke tests, launchd |
 | Evidence | `fixtures/`, `docs/recon.md` | Sanitized recon records and templates |
 
 ### Batch flow
@@ -36,7 +40,7 @@ The proxy is selected by a macOS PAC file (`127.0.0.1:8443/proxy.pac`) that rout
 ### Realtime flow
 
 1. Accept the WSS upgrade on `api.deepgram.com/v1/listen`.
-2. Detect target traffic from the query model plus the active SuperWhisper mode (`sw-deepgram-nova-3`).
+2. Detect target traffic from the query model only (`nova-2`/`nova-3`).
 3. Open a Soniox `stt-rt-v6` session with `pcm_s16le`, 16 kHz, mono, endpoint detection on by default (conservative Soniox settings; disabled for diarization).
 4. Forward binary PCM frames; handle `CloseStream`, `Finalize`, `KeepAlive`.
 5. Accumulate finalized Soniox tokens across the sliding window.
@@ -52,7 +56,7 @@ codesign --verify --deep --strict /Applications/SuperWhisper.app  → exit 0
 csrutil status                                                   → enabled
 ```
 
-No app file was modified. The mode JSON and macOS proxy settings are outside the app bundle.
+No app file or setting is read or modified.
 
 ### Batch
 
@@ -227,7 +231,7 @@ Criterion 12 is limited by Soniox async processing latency, not by the proxy. Ba
 ## Known limitations
 
 - **Batch latency** remains above the 3 s target (p95 ≈ 4.1 s).
-- **SuperWhisper coupling**: the realtime detection depends on the app sending `model=nova-2`/`nova-3` and on the mode JSON format. A future app update may require re-running recon.
+- **Wire coupling**: the realtime detection depends on the app sending `model=nova-2`/`nova-3`. A future app update may require re-running recon.
 - **Certificate lifetime**: the currently installed CA expires 2026-12-07 (30 days from creation). `scripts/gen-certs.sh` now defaults to 365-day CA / 397-day leaf for future runs. Renew and re-trust before expiry.
 - **System keychain**: the CA is also present in the System keychain from the initial manual trust. Teardown removes the login-keychain trust automatically and prints the `sudo` command for the System keychain when it cannot remove it non-interactively. Current app trust was verified through `URLSession`/`security verify-cert` even when explicit trust settings were empty, because the root is present in the login/System keychain.
 - **LaunchAgent**: the GitHub installer uses it by default and it was verified on the development Mac (batch and realtime both work through the agent, which reads the key from Keychain). `nohup` remains a fallback for environments where background Keychain access is restricted.
@@ -243,7 +247,7 @@ Stops the proxy/LaunchAgent, disables the PAC proxy (or restores the previous pr
 ## Reproduce
 
 ```bash
-bash scripts/setup.sh --configure-app --smoke
+bash scripts/setup.sh --smoke
 bash scripts/health.sh
 bash scripts/smoke-target.sh
 bash scripts/smoke-passthrough.sh

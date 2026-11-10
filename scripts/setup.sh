@@ -8,11 +8,11 @@
 #   - trusts the local CA for the current user
 #   - starts the proxy (nohup by default, LaunchAgent with --launchd)
 #   - points the Wi-Fi PAC proxy at 127.0.0.1:8443 for allowlisted hosts only
-#   - optionally creates/activates the SuperWhisper mode and runs smoke tests
+#   - runs smoke tests when requested
+# SuperWhisper itself is never read or modified.
 set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
-CONFIGURE_APP=0
 USE_LAUNCHD=0
 RUN_SMOKE=0
 SKIP_PROXY=0
@@ -23,7 +23,6 @@ usage() {
 Usage: scripts/setup.sh [options]
 
 Options:
-  --configure-app   Create/refresh the SuperWhisper "Soniox Target" mode and make it active.
   --launchd         Install a LaunchAgent instead of using nohup.
   --smoke           Run target, pass-through, and realtime smoke tests at the end.
   --skip-proxy      Do not change the macOS proxy setting.
@@ -34,7 +33,6 @@ EOF
 
 for arg in "$@"; do
   case "$arg" in
-    --configure-app) CONFIGURE_APP=1 ;;
     --launchd) USE_LAUNCHD=1 ;;
     --smoke) RUN_SMOKE=1 ;;
     --skip-proxy) SKIP_PROXY=1 ;;
@@ -250,6 +248,11 @@ if [ "$CA_RENEWED" = "1" ]; then
   fi
 fi
 
+if [ ! -f "$SONIOX_CONTEXT_FILE" ]; then
+  printf 'recognition context\n'
+  bash scripts/configure-soniox-context.sh
+fi
+
 printf 'build\n'
 build_proxy
 
@@ -262,16 +265,6 @@ if [ "$USE_LAUNCHD" = "1" ]; then
   (cd "$ROOT" && bash scripts/install-launchd.sh)
 else
   (cd "$ROOT" && bash scripts/start.sh)
-fi
-
-if [ "$CONFIGURE_APP" = "1" ]; then
-  printf 'SuperWhisper mode\n'
-  if ! (cd "$ROOT" && PRESERVE_MODE=1 bash scripts/configure-superwhisper-mode.sh); then
-    printf 'warning: could not create/activate the SuperWhisper mode.\n' >&2
-    printf 'Run manually: bash %s/scripts/configure-superwhisper-mode.sh\n' "$ROOT" >&2
-  fi
-else
-  printf 'SuperWhisper mode: not changed (use --configure-app to create/activate it)\n'
 fi
 
 if [ "$SKIP_PROXY" = "0" ]; then
@@ -389,5 +382,4 @@ if [ "$RUN_SMOKE" = "1" ]; then
 fi
 
 printf '\nsetup complete\n'
-printf 'Active SuperWhisper mode: %s\n' "$(defaults read com.superduper.superwhisper activeModeKey 2>/dev/null || echo 'unknown')"
 printf 'Teardown: bash scripts/teardown.sh\n'

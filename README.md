@@ -1,5 +1,7 @@
 # SuperWhisper → Soniox local proxy
 
+> **AI agents: read [`AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md`](AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md) first.**
+
 A local TypeScript proxy that lets **SuperWhisper 3.2.1** use **Soniox STT v6** for its built-in **Nova 3** voice model, including realtime dictation. SuperWhisper itself is not patched: the proxy is selected through the normal macOS HTTPS proxy setting, and the app keeps passing its own code-signature checks.
 
 ## What works
@@ -19,7 +21,7 @@ SuperWhisper
    ▼
 local proxy (Node/TypeScript)
    ├─ batch  /v1/listen + model=nova-3              → Soniox stt-async-v6
-   ├─ realtime /v1/listen (WS, target mode)         → Soniox stt-rt-v6
+   ├─ realtime /v1/listen (WS, nova-2/nova-3)       → Soniox stt-rt-v6
    ├─ realtime /v1/speech-to-text/realtime         → ElevenLabs Scribe (live)
    └─ everything else                               → real upstream over TLS
 ```
@@ -32,13 +34,25 @@ A local CA signs the leaf certificate for `api.deepgram.com`, `api.superwhisper.
 curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh | bash
 ```
 
-The installer handles Homebrew dependencies, the Keychain key prompt, the local CA, the LaunchAgent, the system proxy, and the SuperWhisper mode. See [`INSTALL.md`](INSTALL.md) for details, update/uninstall steps, and troubleshooting.
+The installer handles Homebrew dependencies, the Keychain key prompt, the local CA, the LaunchAgent, and the system proxy. It never reads or modifies SuperWhisper. See [`AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md`](AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md) for details, update/uninstall steps, and troubleshooting.
 
-Re-run the same command to upgrade an old install. The current installer requires a clean checkout on the requested branch and only fast-forwards it. It rebuilds `dist/`, verifies certificates, and applies the quality profile without changing existing SuperWhisper modes or Soniox LaunchAgent settings. Download the current installer first; an old installed copy may still reset local changes: `curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh --upgrade`.
+Re-run the same command to upgrade an old install. The current installer requires a clean checkout on the requested branch and only fast-forwards it. It rebuilds `dist/`, verifies certificates, and applies the quality profile. It never touches SuperWhisper. Download the current installer first; an old installed copy may still reset local changes: `curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh --upgrade`.
+
+For a clean reinstall that removes the old checkout and rewrites the proxy
+recognition prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh
+bash /tmp/install.sh --clean
+```
+
+The clean path backs up the old `~/.config/soniox-proxy/context.json`.
+It keeps the Soniox key and certificates.
+It never touches SuperWhisper, its modes, or its settings.
 
 ## Requirements
 
-- macOS with SuperWhisper 3.2.1 installed
+- macOS; SuperWhisper 3.2.1 installed if you want to use the proxy
 - Node.js >= 22
 - pnpm
 - OpenSSL, `jq`, `curl`, `security`, `networksetup`
@@ -63,11 +77,16 @@ What setup does:
    Only the allowlisted
    SuperWhisper, Scribe, ElevenLabs, and Soniox hosts go through the proxy.
    Every other request stays direct.
-7. Creates missing target modes without changing existing modes or their active selection.
-8. `start-fast.sh` applies the provider-recommended quality profile.
-9. With `--smoke`, runs the batch, pass-through, and realtime checks.
+7. Writes the managed recognition prompt to `~/.config/soniox-proxy/context.json`.
+8. Does not read or modify SuperWhisper.
+9. `start-fast.sh` applies the quality profile: strict single-language Soniox,
+   Soniox context terms, Scribe keyterms, and a `1 s` Scribe VAD.
+10. With `--smoke`, runs the batch, pass-through, and realtime checks.
 
-Then in SuperWhisper select **Soniox Target** and dictate. The batch path and the realtime path should both use Soniox.
+Create or select a SuperWhisper mode yourself.
+Use the built-in **Nova 3** voice model for Soniox.
+Use the built-in **Scribe** voice model for Scribe.
+The proxy routes those requests by host, path, and model only.
 
 ### Manual setup
 
@@ -83,6 +102,7 @@ node dist/src/pac-cli.js --host 127.0.0.1 --port 8443 \
 networksetup -setsecurewebproxystate Wi-Fi off
 networksetup -setautoproxyurl Wi-Fi "http://127.0.0.1:8443/proxy.pac"
 networksetup -setautoproxystate Wi-Fi on
+bash scripts/configure-soniox-context.sh
 bash scripts/start-fast.sh
 bash scripts/health.sh
 ```
@@ -108,7 +128,7 @@ pnpm test                         # unit tests
 
 The smoke commands send audio or network requests; run them only with the user's permission.
 
-Scribe is checked through the app: select **Scribe Target**, dictate at least 30 seconds in a quiet room, then compare the saved transcript with the spoken text. The proxy must log `scribe ws upstream open` and relay the final `committed_transcript`; it must not buffer or synthesize finals, and it must not log transcript text.
+Scribe is checked through the app: select a mode that uses the built-in **Scribe** voice model, dictate at least 30 seconds in a quiet room, then compare the saved transcript with the spoken text. The proxy must log `scribe ws upstream open` and relay the final `committed_transcript`; it must not buffer or synthesize finals, and it must not log transcript text.
 
 `scripts/smoke-realtime.mjs` prints only lengths, word counts, and message counts. It never prints transcript text.
 
@@ -151,17 +171,17 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `TARGET_HOST` | `api.deepgram.com` | Intercepted host |
 | `TARGET_PATH` | `/v1/listen` | Intercepted batch path |
 | `TARGET_MODEL` | `nova-3` | Batch model value |
-| `TARGET_VOICE_MODEL_ID` | `sw-deepgram-nova-3` | SuperWhisper voice model ID |
-| `TARGET_MODE_KEY` | `soniox-target` | SuperWhisper mode used for realtime detection |
-| `TARGET_REALTIME_QUERY_MODELS` | `nova-2,nova-3` | Query models that may belong to the target mode |
+| `TARGET_VOICE_MODEL_ID` | `sw-deepgram-nova-3` | Status label only |
+| `TARGET_REALTIME_QUERY_MODELS` | `nova-2,nova-3` | Realtime query models intercepted for Soniox |
 | `WS_MODE` | `soniox` | `soniox` or `passthrough` |
 | `ALLOW_TARGET_WS_PASSTHROUGH` | `false` | Safety gate; keep false |
 | `WS_CLOSE_DELAY_MS` | `350` | Delay before the bridge closes the socket after the final result |
-| `SCRIBE_ENABLED` | `true` | Intercept the Scribe realtime socket for the active Scribe mode |
+| `SCRIBE_ENABLED` | `true` | Intercept the Scribe realtime socket |
 | `SCRIBE_HOST` | `api.elevenlabs.io` | Scribe upstream host |
 | `SCRIBE_PATH` | `/v1/speech-to-text/realtime` | Scribe realtime path |
-| `SCRIBE_VOICE_MODEL_ID` | `sw-elevenlabs-scribe` | SuperWhisper voice model ID |
+| `SCRIBE_VOICE_MODEL_ID` | `sw-elevenlabs-scribe` | Status label only |
 | `SCRIBE_MODEL` | `scribe_v2_realtime` | Expected upstream realtime model |
+| `SCRIBE_KEYTERMS` | `true` | Add the context terms as Scribe keyterms (extra provider cost) |
 | `SCRIBE_VAD_TUNING` | `true` | Rewrite Scribe VAD query parameters for VAD commits |
 | `SCRIBE_VAD_SILENCE_THRESHOLD_SECS` | `1` | Silence before a VAD commit, `0.192`–`3.0` |
 | `SCRIBE_VAD_THRESHOLD` | `0.4` | Scribe speech-detection threshold, `0.1`–`0.9` |
@@ -182,6 +202,10 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SONIOX_CLOSE_BATCH_DELAY_MS` | `1000` | If no final arrives, start full batch recovery after this delay |
 | `SONIOX_CLOSE_RECOVERY_MS` | `15000` | Max time to wait for full batch recovery before returning an error |
 | `SONIOX_LANGUAGE_HINTS` | `ru,en` | Fallback language hints |
+| `SONIOX_LANGUAGE_HINTS_STRICT` | `true` | Use `language_hints_strict` when there is one explicit hint |
+| `SONIOX_CONTEXT_FILE` | `~/.config/soniox-proxy/context.json` | Recognition prompt and term list |
+| `SONIOX_CONTEXT_TEXT` | empty | Extra context text from the environment |
+| `SONIOX_CONTEXT_TERMS` | empty | Comma-separated extra terms |
 | `SONIOX_MAX_CONCURRENCY` | `2` | Batch concurrency |
 | `DRY_RUN` | `false` | Capture/pass-through instead of interception |
 | `CAPTURE_TEMPLATE` | `false` | Write a sanitized response template |
@@ -199,7 +223,7 @@ Key lookup order: `SONIOX_API_KEY` environment → Keychain (`soniox-proxy` / `S
 
 ## Realtime details
 
-SuperWhisper sends its realtime request with `model=nova-2` even when the selected voice model is Nova 3. The proxy therefore reads the active mode from `defaults read com.superduper.superwhisper activeModeKey` and the mode JSON (`voiceModelID === sw-deepgram-nova-3`). This is why you should not switch modes in the middle of a recording.
+SuperWhisper sends its realtime request with `model=nova-2` even when the selected voice model is Nova 3. The proxy intercepts a realtime request when the host is `TARGET_HOST` and the query model is in `TARGET_REALTIME_QUERY_MODELS` (`nova-2,nova-3`). It does not read SuperWhisper settings, defaults, modes, or files.
 
 Soniox returns subword pieces and periodically drops the prefix that it has already finalized. The bridge:
 
@@ -238,17 +262,26 @@ minimum speech/silence durations of `100 ms`. SuperWhisper closes its Scribe
 socket about `1.5 s` after the user stops, so the provider default of `1.5 s`
 leaves no room for the final commit. One second keeps that margin without the
 `0.5 s` fragmentation that glued words together.
+The context terms are appended as Scribe `keyterms`, which improves names and
+product terms. ElevenLabs bills keyterm prompting at an additional rate; set
+`SCRIBE_KEYTERMS=false` to disable it.
+
 Soniox uses `endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`,
 and `max_endpoint_delay_ms=2000`, the defaults from the
 [Soniox endpoint documentation](https://docs.soniox.com/stt/rt/endpoint-detection).
 Those defaults favor recognition accuracy: the model waits longer before
 committing a segment and splits speech into fewer pieces.
+When the request has one explicit language hint (`ru`), the proxy also sends
+`language_hints_strict=true`, following Soniox's single-language guidance.
+Automatic and multi-language requests stay non-strict.
 
-The same values are written to the owned LaunchAgent. Existing SuperWhisper
-modes, their language and audio source, and the active selection are left
-unchanged. A nohup-only setup applies until logout or reboot.
+The managed prompt in `~/.config/soniox-proxy/context.json` is sent as Soniox
+`context` and supplies the Scribe keyterms. Edit its `terms` and `text`, then
+re-run `start-fast.sh`. The proxy does not read SuperWhisper's mode prompt, so a
+translation or writing prompt cannot leak into recognition.
 
-The app folder is detected from SuperWhisper's configured location, with support for both `~/superwhisper` and the older `~/Documents/superwhisper`. `SUPERWHISPER_DOCS_DIR` can override detection for scripts and the proxy.
+The same values are written to the owned LaunchAgent. A nohup-only setup applies
+until logout or reboot. The proxy never reads or modifies SuperWhisper.
 
 If the Soniox WebSocket handshake takes longer than `SONIOX_PREFIX_BATCH_CONNECT_MS` (default 1200 ms), the audio queued during the handshake is transcribed with `stt-async-v6` instead of being burst into the realtime session. The realtime session then starts at the live edge. A burst would leave Soniox permanently behind live audio, and the app closes before the tail is finalized. The prefix tokens are prepended to the same transcript, with live token timestamps shifted by the prefix duration. Diagnostics record `prefix_batch_*` events and `prefix_missing_at_final` if the prefix is still pending at close.
 
@@ -256,9 +289,11 @@ The bridge never sends a partial final. If Soniox is more than `SONIOX_RECONNECT
 
 ## Scribe details
 
-When the active mode is **Scribe Target** (`sw-elevenlabs-scribe`), the app opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy forwards partial, committed, edited, and diagnostic messages unchanged.
+When SuperWhisper opens the Scribe realtime path, it uses `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with `commit_strategy=vad` and a single-use `token` query parameter. The proxy forwards partial, committed, edited, and diagnostic messages unchanged.
 
 For `commit_strategy=vad`, the installed profile sets `vad_silence_threshold_secs=1`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, and `min_silence_duration_ms=100`. The silence value is below the provider default of `1.5 s` so the last sentence is committed before the app closes. Manual and turn-prediction VAD parameters are not rewritten. `SCRIBE_VAD_TUNING=false` leaves the app's VAD parameters unchanged.
+
+The proxy appends the context terms as repeated `keyterms` query parameters, preserving keyterms the app already sent. Realtime Scribe accepts at most 50 keyterms of 20 characters each, so longer terms are skipped. Keyterm prompting has an additional provider cost; `SCRIBE_KEYTERMS=false` disables only this addition.
 
 Every Scribe socket logs `audio_frames`, `audio_bytes`, and `silence_before_close_ms`. If `silence_before_close_ms` is close to `1500`, the app is waiting for a final commit that has not arrived yet; a smaller `vad_silence_threshold_secs` moves the commit earlier.
 
@@ -266,7 +301,7 @@ For every Scribe realtime session, the proxy sets `no_verbatim=false` so Scribe 
 
 The proxy deliberately does not batch, buffer, or suppress Scribe messages. The app closes about 2.5 s after the last audio frame (measured 2026-11-09), before a batch final could arrive; a batch result also cannot reach a closed client. Suppressing upstream finals therefore lost text. Forwarding the upstream `committed_transcript` is the reliable path. The only queue is the short upstream WebSocket handshake; frames are forwarded immediately after it opens. The app's own Scribe final is the transcript; the proxy adds no synthetic final.
 
-While Scribe is active, other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited.
+For the Scribe host, other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited.
 
 A 42 s Russian smoke test delivered the final sentence before the app closed. The microphone also transcribed a nearby voice message, so final checks must run in a quiet room. Live text is never written to logs.
 
@@ -278,7 +313,7 @@ A 42 s Russian smoke test delivered the final sentence before the app closed. Th
 - Session diagnostics contain sizes, counts, timings, codes, and IDs. The private request-parameter log also contains recognition settings; see Diagnostics.
 - The Soniox key lives in Keychain. `certs/` and `logs/` are in `.gitignore`.
 - The local CA private key is mode `600`. Certificates are local-only; new roots default to 365 days. Setup checks expiry, key matching, leaf hostnames, and actual trust before starting the proxy.
-- SuperWhisper is not modified. `codesign --verify --deep --strict /Applications/SuperWhisper.app` passes and SIP is enabled.
+- The proxy never reads or modifies SuperWhisper files, defaults, modes, or settings.
 
 ## Teardown
 
@@ -295,7 +330,7 @@ If the CA was installed in the System keychain, teardown prints the `sudo` comma
 | Symptom | Check |
 | --- | --- |
 | App says it cannot connect / TLS error | `bash scripts/health.sh`; re-run `scripts/setup.sh` then `scripts/start-fast.sh` after trust changes |
-| Batch works, realtime falls back to batch | `tail -f logs/proxy.log` for `soniox realtime connected`, `CloseStream`, `finished`; confirm active mode is `soniox-target` |
+| Batch works, realtime falls back to batch | `tail -f logs/proxy.log` for `soniox realtime connected`, `CloseStream`, `finished`; confirm the realtime request model is `nova-2` or `nova-3` |
 | Realtime text looks truncated | Run `SMOKE_LONG=1 node scripts/smoke-realtime.mjs`; it must report `final_length >= max_interim_length` |
 | Periodic hang or cut at the end | `bash scripts/diagnostics.sh`; check `client_closed_before_final`, `close_to_finish_ms`, `close_text_length` vs `final_text_length` |
 | Pass-through broken | `bash scripts/smoke-passthrough.sh`; check `network`/DNS and the system proxy setting |
@@ -305,6 +340,6 @@ If the CA was installed in the System keychain, teardown prints the `sudo` comma
 ## Known limitations
 
 - **Batch latency**: Soniox async transcription p95 is around 4.1 s on the test machine, above the original 3 s target. This is upstream processing time, not proxy overhead.
-- **App coupling**: target detection depends on SuperWhisper's current mode JSON and its realtime query using `model=nova-2`/`nova-3`. A future app update may change the wire format; re-run the recon procedure in that case.
+- **Wire coupling**: target detection depends on the realtime query using `model=nova-2`/`nova-3`. A future app update may change the wire format; re-run the recon procedure in that case.
 - **Certificates**: setup renews a root or leaf when needed; trust approval can require user interaction.
-- **LaunchAgent Keychain access** depends on the login session; nohup is the default and most predictable mode.
+- **LaunchAgent Keychain access** depends on the login session; nohup is the default and most predictable method.

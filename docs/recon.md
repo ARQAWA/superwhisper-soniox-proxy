@@ -95,21 +95,12 @@ wss://api.deepgram.com/v1/listen?encoding=linear16&sample_rate=16000&channels=1
   &model=nova-2&language=<language>&keywords=...
 ```
 
-Important detail: **the realtime request says `model=nova-2` even when the selected mode uses Nova 3.** The app's mode JSON is the source of truth:
-
-```
-~/Documents/superwhisper/modes/<activeModeKey>.json
-  .voiceModelID == "sw-deepgram-nova-3"
-  .realtimeOutput == true
-```
-
-The proxy reads the active mode key via:
-
-```
-defaults read com.superduper.superwhisper activeModeKey
-```
-
-and then reads the matching mode JSON. `isTargetRealtimeRequest()` in `src/realtime.ts` treats a realtime socket as target traffic when the query model is in `TARGET_REALTIME_QUERY_MODELS` (`nova-2,nova-3`) and the active mode uses `sw-deepgram-nova-3`. A query model literally equal to `TARGET_MODEL` (`nova-3`) is accepted directly (used by the smoke test).
+Historical detail: the realtime request says `model=nova-2` even when the
+selected mode uses Nova 3. The current proxy does not read the mode or any app
+setting. `isTargetRealtimeRequest()` in `src/realtime.ts` treats a realtime
+socket as target traffic when the query model is in
+`TARGET_REALTIME_QUERY_MODELS` (`nova-2,nova-3`). A query model literally equal
+to `TARGET_MODEL` (`nova-3`) is accepted directly (used by the smoke test).
 
 Client frames observed:
 
@@ -144,7 +135,8 @@ Soniox needs about 250 ms after `CloseStream` to decode the very end of the audi
 | Traffic | Detection |
 | --- | --- |
 | Batch `POST /v1/listen`, `model=nova-3`, audio file | `TARGET_HOST` + `TARGET_PATH` + `TARGET_MODEL` |
-| Realtime `/v1/listen` upgrade, `model=nova-2` or `nova-3` | query model in `TARGET_REALTIME_QUERY_MODELS` **and** active mode `voiceModelID === sw-deepgram-nova-3` |
+| Realtime `/v1/listen` upgrade, `model=nova-2` or `nova-3` | query model in `TARGET_REALTIME_QUERY_MODELS` |
+| Scribe realtime upgrade | `SCRIBE_ENABLED` + `SCRIBE_HOST` + `SCRIBE_PATH` |
 | Everything else | Pass-through |
 
 All other hosts use a raw CONNECT tunnel and are never decrypted. `api.deepgram.com` uses a local-CA MITM because it is the target host; non-target paths/models on that host are forwarded to the real Deepgram over TLS and logged as pass-through.

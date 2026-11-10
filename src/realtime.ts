@@ -1,9 +1,7 @@
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { IncomingMessage } from "node:http";
-import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { dirname } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
 import type { RealtimeResult, RealtimeSttSession, RealtimeToken } from "@soniox/node";
@@ -1382,75 +1380,13 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   });
 }
 
-let activeModeCache: { at: number; modeKey: string; voiceModelId: string | null } = {
-  at: 0,
-  modeKey: "",
-  voiceModelId: null,
-};
-
-function superwhisperDirectory(): string {
-  if (process.env.SUPERWHISPER_DOCS_DIR) return process.env.SUPERWHISPER_DOCS_DIR;
-  try {
-    const parent = execFileSync(
-      "/usr/bin/defaults",
-      ["read", "com.superduper.superwhisper", "appFolderDirectory"],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 1000 },
-    ).trim();
-    if (parent) return basename(parent) === "superwhisper" ? parent : join(parent, "superwhisper");
-  } catch {
-    // Older installations may not have an explicit app folder preference.
-  }
-  const modern = join(homedir(), "superwhisper");
-  const legacy = join(homedir(), "Documents", "superwhisper");
-  if (existsSync(join(modern, "modes"))) return modern;
-  if (existsSync(join(legacy, "modes"))) return legacy;
-  return modern;
-}
-
-export function activeModeVoiceModelId(config: AppConfig): string | null {
-  let modeKey = config.TARGET_MODE_KEY;
-  try {
-    const out = execFileSync("/usr/bin/defaults", ["read", "com.superduper.superwhisper", "activeModeKey"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 1000,
-    }).trim();
-    if (out) modeKey = out;
-  } catch {
-    // fall back to configured mode key
-  }
-  if (Date.now() - activeModeCache.at < 1000 && activeModeCache.modeKey === modeKey) {
-    return activeModeCache.voiceModelId;
-  }
-  let voiceModelId: string | null = null;
-  try {
-    const modePath = join(superwhisperDirectory(), "modes", `${modeKey}.json`);
-    const mode = JSON.parse(readFileSync(modePath, "utf8")) as { voiceModelID?: string };
-    voiceModelId = mode.voiceModelID ?? null;
-  } catch {
-    voiceModelId = null;
-  }
-  activeModeCache = { at: Date.now(), modeKey, voiceModelId };
-  return voiceModelId;
-}
-
-export function activeModeUsesVoiceModel(config: AppConfig, voiceModelId: string): boolean {
-  return activeModeVoiceModelId(config) === voiceModelId;
-}
-
-function activeModeUsesTargetVoiceModel(config: AppConfig): boolean {
-  return activeModeUsesVoiceModel(config, config.TARGET_VOICE_MODEL_ID);
-}
-
-export function isScribeModeActive(config: AppConfig): boolean {
-  return config.SCRIBE_ENABLED && activeModeUsesVoiceModel(config, config.SCRIBE_VOICE_MODEL_ID);
-}
-
 export function isTargetRealtimeRequest(config: AppConfig, model: string | null): boolean {
   if (!model) return false;
   if (model === config.TARGET_MODEL) return true;
-  if (!config.TARGET_REALTIME_QUERY_MODELS.split(",").map((s) => s.trim()).includes(model)) return false;
-  return activeModeUsesTargetVoiceModel(config);
+  return config.TARGET_REALTIME_QUERY_MODELS
+    .split(",")
+    .map((s) => s.trim())
+    .includes(model);
 }
 
 export function attachWebSocketHandler(server: import("node:http").Server, deps: WsDeps): void {
@@ -1466,8 +1402,7 @@ export function attachWebSocketHandler(server: import("node:http").Server, deps:
       config.SCRIBE_ENABLED &&
       config.WS_MODE !== "passthrough" &&
       host === config.SCRIBE_HOST &&
-      url.pathname === config.SCRIBE_PATH &&
-      activeModeUsesVoiceModel(config, config.SCRIBE_VOICE_MODEL_ID);
+      url.pathname === config.SCRIBE_PATH;
 
     if (isScribe) {
       wss.handleUpgrade(req, socket, head, (client) => scribeWebSocket(req, client, deps));

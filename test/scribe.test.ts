@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { applyScribeVadTuning, forwardScribeFrame } from "../src/scribe.js";
+import { applyScribeKeyterms, applyScribeVadTuning, forwardScribeFrame } from "../src/scribe.js";
 
 interface SentFrame {
   data: WebSocket.RawData;
@@ -51,6 +51,15 @@ describe("Scribe VAD tuning", () => {
 });
 
 describe("Scribe forwarding", () => {
+  it("appends context terms as keyterms without duplicating app terms", () => {
+    const url = new URL(
+      "wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&keyterms=Codex",
+    );
+    const added = applyScribeKeyterms(url, { terms: ["codex", "Soniox", "a-term-longer-than-twenty"] });
+    expect(added).toEqual(["Soniox"]);
+    expect(url.searchParams.getAll("keyterms")).toEqual(["Codex", "Soniox"]);
+  });
+
   it("forwards upstream text frames unchanged", () => {
     const client = fakeClient(WebSocket.OPEN);
     const frame = Buffer.from(JSON.stringify({ message_type: "committed_transcript", text: "готово" }));

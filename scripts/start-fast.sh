@@ -1,8 +1,8 @@
 #!/bin/bash
 # Apply the provider-recommended quality profile and restart the proxy.
 # Soniox and Scribe both run their documented defaults, which favor
-# recognition quality over endpoint latency. Existing SuperWhisper modes and
-# active selection are left unchanged.
+# recognition quality over endpoint latency. SuperWhisper is never read or
+# modified; only the proxy and its LaunchAgent are touched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -14,7 +14,6 @@ require_cmd curl
 require_cmd plutil
 require_cmd lsof
 require_cmd pnpm
-require_cmd defaults
 
 if launchctl print "gui/$(id -u)/$LAUNCHD_LABEL" >/dev/null 2>&1 \
   && ! launchctl_service_is_this_install; then
@@ -26,61 +25,15 @@ if [ -f "$LAUNCHD_PLIST" ] && ! plist_targets_this_install; then
   exit 1
 fi
 
-DOCS_DIR="$(superwhisper_docs_dir)"
-MODE_KEY="${MODE_KEY:-soniox-target}"
-MODE_PATH="$DOCS_DIR/modes/$MODE_KEY.json"
-SCRIBE_MODE_KEY=scribe-target
-SCRIBE_MODE_PATH="$DOCS_DIR/modes/$SCRIBE_MODE_KEY.json"
-
-app_was_running=0
-reopen_app=0
-if pgrep -x -i superwhisper >/dev/null 2>&1; then
-  app_was_running=1
-fi
-restore_app() {
-  if [ "$reopen_app" = "1" ] && [ "$app_was_running" = "1" ] \
-    && ! pgrep -x -i superwhisper >/dev/null 2>&1; then
-    open -a SuperWhisper >/dev/null 2>&1 || true
-  fi
-}
-trap restore_app EXIT
-
-configure_mode() {
-  local key="$1" name="$2" model="$3"
-  [ -f "$DOCS_DIR/modes/$key.json" ] && return 0
-  reopen_app=1
-  MODE_KEY="$key" MODE_NAME="$name" VOICE_MODEL_ID="$model" \
-  SUPERWHISPER_DOCS_DIR="$DOCS_DIR" \
-  PRESERVE_MODE=1 KEEP_EXISTING_MODE=1 ACTIVATE_MODE=0 LANGUAGE=auto NO_RESTART=1 \
-    bash scripts/configure-superwhisper-mode.sh
-}
-
 build_proxy
 
-if [ "${SKIP_MODE_SETUP:-0}" != "1" ]; then
-  configure_mode "$SCRIBE_MODE_KEY" "Scribe Target" sw-elevenlabs-scribe
-  configure_mode "$MODE_KEY" "Soniox Target" sw-deepgram-nova-3
-  restore_app
-  reopen_app=0
-
-  for mode_path in "$SCRIBE_MODE_PATH" "$MODE_PATH"; do
-    if ! jq -e '.realtimeOutput == true' "$mode_path" >/dev/null; then
-      printf 'enable realtime output in SuperWhisper for mode: %s\n' "$mode_path" >&2
-      exit 1
-    fi
-  done
-  if ! jq -e '.voiceModelID == "sw-elevenlabs-scribe"' "$SCRIBE_MODE_PATH" >/dev/null; then
-    printf 'Scribe Target must use sw-elevenlabs-scribe.\n' >&2
-    exit 1
-  fi
-  if ! jq -e '.voiceModelID == "sw-deepgram-nova-3"' "$MODE_PATH" >/dev/null; then
-    printf 'Soniox Target must use sw-deepgram-nova-3.\n' >&2
-    exit 1
-  fi
+if [ ! -f "$SONIOX_CONTEXT_FILE" ]; then
+  bash scripts/configure-soniox-context.sh
 fi
 
 export WS_MODE="${WS_MODE:-soniox}"
 export DRY_RUN="${DRY_RUN:-false}"
+export SONIOX_LANGUAGE_HINTS_STRICT="${SONIOX_LANGUAGE_HINTS_STRICT:-true}"
 export SONIOX_ENDPOINT_DETECTION="${SONIOX_ENDPOINT_DETECTION:-true}"
 export SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL="${SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL:-0}"
 export SONIOX_ENDPOINT_SENSITIVITY="${SONIOX_ENDPOINT_SENSITIVITY:-0}"
@@ -91,6 +44,7 @@ export SCRIBE_HOST="${SCRIBE_HOST:-api.elevenlabs.io}"
 export SCRIBE_PATH="${SCRIBE_PATH:-/v1/speech-to-text/realtime}"
 export SCRIBE_MODEL="${SCRIBE_MODEL:-scribe_v2_realtime}"
 export SCRIBE_VOICE_MODEL_ID="${SCRIBE_VOICE_MODEL_ID:-sw-elevenlabs-scribe}"
+export SCRIBE_KEYTERMS="${SCRIBE_KEYTERMS:-true}"
 export SCRIBE_VAD_SILENCE_THRESHOLD_SECS=1
 export SCRIBE_VAD_THRESHOLD=0.4
 export SCRIBE_MIN_SPEECH_DURATION_MS=100
@@ -120,10 +74,12 @@ if [ -f "$LAUNCHD_PLIST" ]; then
     exit 1
   fi
   plist_set_env SONIOX_ENDPOINT_DETECTION true
+  plist_set_env SONIOX_LANGUAGE_HINTS_STRICT "$SONIOX_LANGUAGE_HINTS_STRICT"
   plist_set_env SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL 0
   plist_set_env SONIOX_ENDPOINT_SENSITIVITY 0
   plist_set_env SONIOX_MAX_ENDPOINT_DELAY_MS 2000
   plist_set_env SCRIBE_VAD_TUNING true
+  plist_set_env SCRIBE_KEYTERMS "$SCRIBE_KEYTERMS"
   plist_set_env SCRIBE_VAD_SILENCE_THRESHOLD_SECS 1
   plist_set_env SCRIBE_VAD_THRESHOLD 0.4
   plist_set_env SCRIBE_MIN_SPEECH_DURATION_MS 100
@@ -138,7 +94,7 @@ launchd_pid() {
 }
 
 profile_health_ok() {
-  proxy_health_json | jq -e '
+  proxy_health_json | jq -e --arg strict "$SONIOX_LANGUAGE_HINTS_STRICT" '
     .ok == true
     and .target_host == "api.deepgram.com"
     and .target_path == "/v1/listen"
@@ -155,6 +111,7 @@ profile_health_ok() {
     and .scribe_model == "scribe_v2_realtime"
     and .scribe_voice_model_id == "sw-elevenlabs-scribe"
     and .soniox_endpoint_detection == true
+    and ($strict != "true" or .soniox_language_hints_strict == true)
     and .soniox_endpoint_sensitivity == 0
     and .soniox_endpoint_latency_adjustment_level == 0
     and .soniox_max_endpoint_delay_ms == 2000
@@ -224,4 +181,4 @@ fi
 printf 'quality profile is active and verified\n'
 proxy_health_json
 printf '\n'
-printf 'existing SuperWhisper modes and active selection were preserved\n'
+printf 'SuperWhisper settings and modes were not touched\n'

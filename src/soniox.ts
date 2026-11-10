@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { SonioxNodeClient } from "@soniox/node";
 import type { RealtimeSttSession } from "@soniox/node";
-import type { TranscriptToken } from "@soniox/node";
+import type { TranscriptToken, TranscriptionContext } from "@soniox/node";
 import type { AppConfig } from "./config.js";
+import {
+  configuredContext,
+  contextSummary,
+  shouldUseStrictLanguage,
+} from "./context.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
@@ -15,6 +20,14 @@ export interface SonioxResult {
   transcriptionId: string;
   clientReferenceId: string;
   language: string;
+}
+
+function diagnosticParameters(
+  parameters: Record<string, unknown>,
+  context: TranscriptionContext | null,
+): Record<string, unknown> {
+  const { context: _context, ...rest } = parameters;
+  return context ? { ...rest, context: contextSummary(context) } : rest;
 }
 
 class Semaphore {
@@ -102,6 +115,7 @@ function languageFromRequest(fields: Record<string, string>): { hints: string[];
 export class SonioxService {
   private readonly client: SonioxNodeClient;
   private readonly semaphore: Semaphore;
+  private readonly context: TranscriptionContext | null;
 
   constructor(
     private readonly config: AppConfig,
@@ -111,8 +125,16 @@ export class SonioxService {
     if (!config.sonioxApiKey) {
       throw new Error("SONIOX_API_KEY is not configured (env, Keychain, or ~/.config/soniox-proxy/api-key)");
     }
+    this.context = configuredContext(config, logger);
+    if (this.context) {
+      logger.info({ ...contextSummary(this.context) }, "soniox context loaded");
+    }
     this.client = new SonioxNodeClient({ api_key: config.sonioxApiKey });
     this.semaphore = new Semaphore(config.SONIOX_MAX_CONCURRENCY);
+  }
+
+  contextInfo(): { general: number; terms: number; text_chars: number } {
+    return contextSummary(this.context);
   }
 
   createRealtimeSession(options: {
@@ -127,12 +149,18 @@ export class SonioxService {
     maxEndpointDelayMs: number;
     clientReferenceId: string;
   }): RealtimeSttSession {
+    const languageHintsStrict = shouldUseStrictLanguage(
+      options.languageHints,
+      options.identifyLanguage,
+      this.config.SONIOX_LANGUAGE_HINTS_STRICT,
+    );
     const parameters = {
       model: this.config.SONIOX_REALTIME_MODEL,
       audio_format: "pcm_s16le" as const,
       sample_rate: options.sampleRate,
       num_channels: options.channels,
       language_hints: options.languageHints,
+      language_hints_strict: languageHintsStrict,
       enable_language_identification: options.identifyLanguage,
       enable_speaker_diarization: options.diarize,
       client_reference_id: options.clientReferenceId,
@@ -144,10 +172,14 @@ export class SonioxService {
             max_endpoint_delay_ms: options.maxEndpointDelayMs,
           }
         : {}),
+      ...(this.context ? { context: this.context } : {}),
     };
     const session = this.client.realtime.stt(parameters);
     session.on("connected", () => {
-      this.diagnostics?.recordRequestParameters("soniox", parameters);
+      this.diagnostics?.recordRequestParameters(
+        "soniox",
+        diagnosticParameters(parameters, this.context),
+      );
     });
     return session;
   }
@@ -173,8 +205,14 @@ export class SonioxService {
         cleanup: ["file", "transcription"],
         client_reference_id: clientReferenceId,
         language_hints: lang.hints,
+        language_hints_strict: shouldUseStrictLanguage(
+          lang.hints,
+          lang.identify,
+          this.config.SONIOX_LANGUAGE_HINTS_STRICT,
+        ),
         enable_language_identification: lang.identify,
         enable_speaker_diarization: diarize,
+        ...(this.context ? { context: this.context } : {}),
         fetch_transcript: true,
         timeout_ms: this.config.SONIOX_TIMEOUT_MS,
         wait_options: {

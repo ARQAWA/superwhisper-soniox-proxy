@@ -13,6 +13,9 @@ describe("Soniox realtime tuning", () => {
     expect(loaded.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL).toBe(0);
     expect(loaded.SONIOX_MAX_ENDPOINT_DELAY_MS).toBe(2000);
     expect(loaded.SONIOX_KEEPALIVE_MS).toBe(10000);
+    expect(loaded.SONIOX_LANGUAGE_HINTS_STRICT).toBe(true);
+    expect(loaded.SONIOX_CONTEXT_FILE).toContain(".config/soniox-proxy/context.json");
+    expect(loaded.SCRIBE_KEYTERMS).toBe(true);
     expect(loaded.SCRIBE_VAD_TUNING).toBe(true);
     expect(loaded.SCRIBE_VAD_SILENCE_THRESHOLD_SECS).toBe(1);
     expect(loaded.SCRIBE_VAD_THRESHOLD).toBe(0.4);

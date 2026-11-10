@@ -28,7 +28,6 @@ const EnvSchema = z.object({
   TARGET_PATH: z.string().default("/v1/listen"),
   TARGET_MODEL: z.string().default("nova-3"),
   TARGET_VOICE_MODEL_ID: z.string().default("sw-deepgram-nova-3"),
-  TARGET_MODE_KEY: z.string().default("soniox-target"),
   TARGET_REALTIME_QUERY_MODELS: z.string().default("nova-2,nova-3"),
   DRY_RUN: boolFromEnv(false),
   CAPTURE_TEMPLATE: boolFromEnv(false),
@@ -74,6 +73,13 @@ const EnvSchema = z.object({
   ALLOW_TARGET_WS_PASSTHROUGH: boolFromEnv(false),
   WS_CLOSE_DELAY_MS: z.coerce.number().int().min(0).max(5000).default(350),
   SONIOX_LANGUAGE_HINTS: z.string().default("ru,en"),
+  SONIOX_LANGUAGE_HINTS_STRICT: boolFromEnv(true),
+  SONIOX_CONTEXT_FILE: z
+    .string()
+    .default(join(homedir(), ".config", "soniox-proxy", "context.json")),
+  SONIOX_CONTEXT_TEXT: z.string().default(""),
+  SONIOX_CONTEXT_TERMS: z.string().default(""),
+  SCRIBE_KEYTERMS: boolFromEnv(true),
   SONIOX_MAX_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   CERT_DIR: z.string().default(join(process.cwd(), "certs")),
   LOG_DIR: z.string().default(join(process.cwd(), "logs")),

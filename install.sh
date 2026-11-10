@@ -15,9 +15,9 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/superwhisper-soniox-proxy}"
 
 USE_LAUNCHD=1
 RUN_SMOKE=0
-CONFIGURE_APP=1
 REMOTE_INSTALL=0
 FORCE_UPGRADE=0
+CLEAN=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -29,8 +29,9 @@ Usage: install.sh [options]
 Options:
   --no-launchd        Use nohup instead of a LaunchAgent (not persistent across reboots).
   --smoke             Run batch, pass-through, and realtime smoke tests after setup.
-  --no-configure-app  Do not create/activate the SuperWhisper modes.
   --upgrade           Force an update of the installed checkout even when run from it.
+  --clean             Clean reinstall: remove the old checkout, reset the proxy
+                      recognition context, then install fresh.
   -h, --help          Show this help.
 
 Environment:
@@ -46,8 +47,8 @@ for arg in "$@"; do
   case "$arg" in
     --no-launchd) USE_LAUNCHD=0 ;;
     --smoke) RUN_SMOKE=1 ;;
-    --no-configure-app) CONFIGURE_APP=0 ;;
     --upgrade) FORCE_UPGRADE=1 ;;
+    --clean) CLEAN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $arg (try --help)" ;;
   esac
@@ -59,8 +60,19 @@ done
 # re-run as an upgrade. Do this before the self-update re-exec so an update cannot
 # change the running script.
 script_source="${BASH_SOURCE[0]:-}"
+
+# --clean removes the checkout that may contain this script. Re-exec from the
+# open file descriptor first so bash never needs the deleted path again.
+if [ "$CLEAN" = "1" ] && [ "${CLEAN_REEXEC:-0}" != "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
+  source_dir="$(cd "$(dirname "$script_source")" && pwd)"
+  install_dir="$(cd "$INSTALL_DIR" 2>/dev/null && pwd || true)"
+  if [ -n "$install_dir" ] && [ "$source_dir" = "$install_dir" ]; then
+    CLEAN_REEXEC=1 exec bash -s -- "$@" <"$script_source"
+  fi
+fi
+
 auto_upgrade=0
-if [ -n "$script_source" ] && [ -f "$script_source" ]; then
+if [ "$CLEAN" != "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
   source_dir="$(cd "$(dirname "$script_source")" && pwd)"
   install_dir="$(cd "$INSTALL_DIR" 2>/dev/null && pwd || true)"
   if [ -n "$install_dir" ] && [ "$source_dir" = "$install_dir" ]; then
@@ -80,16 +92,48 @@ fi
 
 # If this script is part of a local checkout, install from that checkout.
 ROOT=""
-if [ "$FORCE_UPGRADE" != "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
+if [ "$CLEAN" != "1" ] && [ "$FORCE_UPGRADE" != "1" ] && [ -n "$script_source" ] && [ -f "$script_source" ]; then
   candidate="$(cd "$(dirname "$script_source")" && pwd)"
   if [ -f "$candidate/package.json" ] && [ -d "$candidate/src" ]; then
     ROOT="$candidate"
   fi
 fi
 
+clean_old_install() {
+  local dir="$INSTALL_DIR" origin
+  [ -d "$dir" ] || return 0
+  case "$dir" in
+    "$HOME/.local/share/"*) ;;
+    *)
+      die "refusing --clean outside ~/.local/share: $dir"
+      ;;
+  esac
+  [ "$dir" != "$HOME/.local/share" ] || die "refusing --clean on the shared data directory"
+  if [ -d "$dir/.git" ]; then
+    origin="$(git -C "$dir" remote get-url origin 2>/dev/null || true)"
+    case "$origin" in
+      *"$GITHUB_REPO"*) ;;
+      *)
+        die "refusing --clean: $dir origin is ${origin:-unknown}, expected $GITHUB_REPO"
+        ;;
+    esac
+  fi
+  if [ -x "$dir/scripts/stop.sh" ]; then
+    say "stopping the old proxy"
+    if ! (cd "$dir" && bash scripts/stop.sh); then
+      die "could not stop the old proxy in $dir; stop it manually before --clean"
+    fi
+  fi
+  say "removing old install: $dir"
+  rm -rf "$dir"
+}
+
 if [ -z "$ROOT" ]; then
   command -v git >/dev/null 2>&1 || die "git is required. Install Xcode Command Line Tools or run: xcode-select --install"
   mkdir -p "$(dirname "$INSTALL_DIR")"
+  if [ "$CLEAN" = "1" ]; then
+    clean_old_install
+  fi
   if [ -d "$INSTALL_DIR/.git" ]; then
     say "updating $INSTALL_DIR"
     if [ -n "$(git -C "$INSTALL_DIR" status --porcelain)" ]; then
@@ -175,11 +219,11 @@ if [ -z "${SONIOX_API_KEY:-}" ] && [ ! -t 0 ]; then
   fi
 fi
 
-if [ "$CONFIGURE_APP" = "1" ] && [ ! -d /Applications/SuperWhisper.app ]; then
-  say "SuperWhisper.app is not installed yet."
-  say "Install it, open it once, then re-run this installer (or run: bash scripts/configure-superwhisper-mode.sh)."
-  say "The proxy is installed anyway; the SuperWhisper mode step is skipped."
-  CONFIGURE_APP=0
+if [ "$CLEAN" = "1" ]; then
+  say "resetting the recognition context prompt"
+  bash scripts/configure-soniox-context.sh --reset
+else
+  bash scripts/configure-soniox-context.sh
 fi
 
 setup_args=()
@@ -189,12 +233,8 @@ setup_args=()
 say "installing from $ROOT"
 bash scripts/setup.sh "${setup_args[@]}"
 
-skip_mode_setup=0
-if [ "$CONFIGURE_APP" != "1" ]; then
-  skip_mode_setup=1
-fi
 say "applying the current Scribe profile"
-if ! (cd "$ROOT" && SKIP_MODE_SETUP="$skip_mode_setup" bash scripts/start-fast.sh); then
+if ! (cd "$ROOT" && bash scripts/start-fast.sh); then
   die "proxy setup succeeded, but the current profile failed to apply. Run: bash $ROOT/scripts/start-fast.sh"
 fi
 
@@ -205,4 +245,5 @@ say "logs:         \"$ROOT/logs/proxy.log\""
 say "uninstall:    bash \"$ROOT/scripts/teardown.sh\""
 say "update:       re-run this installer (requires a clean checkout)"
 say ""
-say "Open SuperWhisper and select the target mode you want to use."
+say "The proxy does not read or modify SuperWhisper."
+say "Create or select a SuperWhisper mode yourself."

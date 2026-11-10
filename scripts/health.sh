@@ -1,6 +1,6 @@
 #!/bin/bash
-# Verify that the local proxy, system proxy, certificate, key, and app signature
-# are in the expected state. Prints no secrets and no transcript text.
+# Verify that the local proxy, system proxy, certificate, key, and recognition
+# context are in the expected state. Prints no secrets and no transcript text.
 set -uo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
 
@@ -80,6 +80,15 @@ else
   bad "Soniox key is missing; run scripts/setup.sh"
 fi
 
+printf 'recognition context\n'
+require_cmd jq
+if [ -f "$SONIOX_CONTEXT_FILE" ] && jq -e 'type == "object"' "$SONIOX_CONTEXT_FILE" >/dev/null 2>&1; then
+  context_summary="$(jq -r '"\((.terms // [] | length)) terms, \((.text // "" | length)) text chars"' "$SONIOX_CONTEXT_FILE")"
+  ok "context prompt: $context_summary"
+else
+  warn "context prompt is missing or invalid: $SONIOX_CONTEXT_FILE (run scripts/configure-soniox-context.sh)"
+fi
+
 printf 'diagnostics\n'
 diag_dir="${DIAG_DIR:-$HOME/Library/Caches/soniox-proxy/diagnostics}"
 if [ -d "$diag_dir" ]; then
@@ -134,22 +143,6 @@ fi
 secure_enabled="$(networksetup -getsecurewebproxy "$NETWORK_SERVICE" 2>/dev/null | awk -F': ' '/^Enabled:/{print $2}')"
 if [ "$secure_enabled" = "Yes" ]; then
   warn "$NETWORK_SERVICE secure web proxy is still enabled; it would capture every host"
-fi
-
-printf 'app\n'
-if [ -d /Applications/SuperWhisper.app ]; then
-  if codesign --verify --deep --strict /Applications/SuperWhisper.app >/dev/null 2>&1; then
-    ok "codesign --verify --deep --strict passes"
-  else
-    bad "SuperWhisper code signature verification failed"
-  fi
-  if [ "$(csrutil status 2>/dev/null | grep -c 'enabled')" -gt 0 ]; then
-    ok "System Integrity Protection is enabled"
-  else
-    warn "System Integrity Protection is not enabled"
-  fi
-else
-  warn "SuperWhisper.app not found in /Applications"
 fi
 
 if [ "$failures" -eq 0 ]; then

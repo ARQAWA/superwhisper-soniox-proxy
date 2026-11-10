@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import https from "node:https";
+import type { TranscriptionContext } from "@soniox/node";
 import { WebSocket } from "ws";
 import type { AppConfig } from "./config.js";
+import { configuredContext, scribeKeyterms } from "./context.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
@@ -159,6 +161,12 @@ export function applyScribeVadTuning(url: URL, tuning: ScribeVadTuning): URL {
   return next;
 }
 
+export function applyScribeKeyterms(url: URL, context: TranscriptionContext | null): string[] {
+  const added = scribeKeyterms(context, url.searchParams.getAll("keyterms"));
+  for (const term of added) url.searchParams.append("keyterms", term);
+  return added;
+}
+
 export function forwardScribeFrame(
   client: ScribeFrameSink,
   data: WebSocket.RawData,
@@ -182,6 +190,10 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
       })
     : new URL(url.toString());
   tunedUrl.searchParams.set("no_verbatim", "false");
+  const existingKeyterms = tunedUrl.searchParams.getAll("keyterms");
+  const addedKeyterms = config.SCRIBE_KEYTERMS
+    ? applyScribeKeyterms(tunedUrl, configuredContext(config, logger))
+    : [];
   const vadApplied =
     config.SCRIBE_VAD_TUNING && url.searchParams.get("commit_strategy") === "vad";
   const target = `wss://${host}${tunedUrl.pathname}${tunedUrl.search}`;
@@ -222,6 +234,7 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
       min_silence_duration_ms: vadApplied
         ? numericQueryParam(tunedUrl, "min_silence_duration_ms")
         : null,
+      keyterms: existingKeyterms.length + addedKeyterms.length,
     },
     "scribe ws upstream connecting",
   );

@@ -19,6 +19,8 @@ PID_FILE="${PID_FILE:-$LOG_DIR/proxy.pid}"
 STATE_FILE="${STATE_FILE:-$LOG_DIR/setup-state.env}"
 PAC_PATH="${PAC_PATH:-$LOG_DIR/proxy.pac}"
 PROXY_ALLOWED_HOSTS="${PROXY_ALLOWED_HOSTS:-api.superwhisper.com,api.deepgram.com,api.elevenlabs.io,api.soniox.com}"
+SONIOX_CONTEXT_FILE="${SONIOX_CONTEXT_FILE:-$HOME/.config/soniox-proxy/context.json}"
+SONIOX_CONTEXT_PROFILE="${SONIOX_CONTEXT_PROFILE:-$ROOT/profiles/soniox-context.json}"
 LAUNCHD_LABEL="${LAUNCHD_LABEL:-com.superwhisper.soniox-proxy}"
 LAUNCHD_PLIST="${LAUNCHD_PLIST:-$HOME/Library/LaunchAgents/$LAUNCHD_LABEL.plist}"
 KEYCHAIN_SERVICE="${KEYCHAIN_SERVICE:-soniox-proxy}"
@@ -29,32 +31,6 @@ require_cmd() {
     printf 'missing required command: %s\n' "$1" >&2
     exit 1
   }
-}
-
-superwhisper_docs_dir() {
-  local parent modern legacy
-  if [ -n "${SUPERWHISPER_DOCS_DIR:-}" ]; then
-    printf '%s\n' "$SUPERWHISPER_DOCS_DIR"
-    return
-  fi
-  parent="$(defaults read com.superduper.superwhisper appFolderDirectory 2>/dev/null || true)"
-  if [ -n "$parent" ]; then
-    if [ "$(basename "$parent")" = "superwhisper" ]; then
-      printf '%s\n' "$parent"
-    else
-      printf '%s/superwhisper\n' "${parent%/}"
-    fi
-    return
-  fi
-  modern="$HOME/superwhisper"
-  legacy="$HOME/Documents/superwhisper"
-  if [ -d "$modern/modes" ]; then
-    printf '%s\n' "$modern"
-  elif [ -d "$legacy/modes" ]; then
-    printf '%s\n' "$legacy"
-  else
-    printf '%s\n' "$modern"
-  fi
 }
 
 build_proxy() (

@@ -11,7 +11,7 @@ import { errorPayload, readRequestBody, sendJson, sendUpstreamResponse, upstream
 import type { Logger } from "./logger.js";
 import { parseMultipart } from "./multipart.js";
 import { SonioxService } from "./soniox.js";
-import { attachWebSocketHandler, isScribeModeActive } from "./realtime.js";
+import { attachWebSocketHandler } from "./realtime.js";
 import { warmScribeTls } from "./scribe.js";
 import { describeSchema, loadTemplate, renderDeepgramLikeResponse, sanitizeForTemplate } from "./template.js";
 import type { ParsedMultipart, RequestMeta, RequestSummary } from "./types.js";
@@ -187,6 +187,7 @@ export function createRequestHandler(deps: ProxyDeps) {
       return;
     }
     if (localHealthHost && path === "/__health" && (req.method === "GET" || req.method === "HEAD")) {
+      const sonioxContext = soniox.contextInfo();
       sendJson(res, 200, {
         ok: true,
         dry_run: config.DRY_RUN,
@@ -197,6 +198,10 @@ export function createRequestHandler(deps: ProxyDeps) {
         target_realtime_query_models: config.TARGET_REALTIME_QUERY_MODELS,
         ws_mode: config.WS_MODE,
         soniox_realtime_model: config.SONIOX_REALTIME_MODEL,
+        soniox_language_hints_strict: config.SONIOX_LANGUAGE_HINTS_STRICT,
+        soniox_context_general: sonioxContext.general,
+        soniox_context_terms: sonioxContext.terms,
+        soniox_context_text_chars: sonioxContext.text_chars,
         soniox_endpoint_detection: config.SONIOX_ENDPOINT_DETECTION,
         soniox_endpoint_sensitivity: config.SONIOX_ENDPOINT_SENSITIVITY,
         soniox_endpoint_latency_adjustment_level: config.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
@@ -211,6 +216,7 @@ export function createRequestHandler(deps: ProxyDeps) {
         scribe_path: config.SCRIBE_PATH,
         scribe_model: config.SCRIBE_MODEL,
         scribe_voice_model_id: config.SCRIBE_VOICE_MODEL_ID,
+        scribe_keyterms: config.SCRIBE_KEYTERMS,
         scribe_vad_tuning: config.SCRIBE_VAD_TUNING,
         scribe_vad_silence_threshold_secs: config.SCRIBE_VAD_SILENCE_THRESHOLD_SECS,
         scribe_vad_threshold: config.SCRIBE_VAD_THRESHOLD,
@@ -555,8 +561,7 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const onConnect = (req: IncomingMessage, clientSocket: net.Socket, head: Buffer): void => {
     trackSocket(clientSocket);
     const { hostname, port } = splitHostPort(req.url ?? "");
-    const scribeMitm =
-      config.SCRIBE_ENABLED && hostname === config.SCRIBE_HOST && isScribeModeActive(config);
+    const scribeMitm = config.SCRIBE_ENABLED && hostname === config.SCRIBE_HOST;
     if ((hostname === config.TARGET_HOST || scribeMitm) && tlsServer) {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) clientSocket.unshift(head);
