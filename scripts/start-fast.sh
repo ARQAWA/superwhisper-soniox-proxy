@@ -31,6 +31,18 @@ if [ ! -f "$SONIOX_CONTEXT_FILE" ]; then
   bash scripts/configure-soniox-context.sh
 fi
 
+obsolete_env=(
+  SCRIBE_KEYTERMS
+  SONIOX_PREFIX_BATCH_CONNECT_MS
+  SONIOX_RECONNECT_LAG_MS
+  SONIOX_RECONNECT_MAX
+  SONIOX_RECONNECT_OVERLAP_MS
+  SONIOX_CLOSE_ERROR_LAG_MS
+  SONIOX_CLOSE_BATCH_DELAY_MS
+  SONIOX_CLOSE_RECOVERY_MS
+)
+unset "${obsolete_env[@]}"
+
 export WS_MODE="${WS_MODE:-soniox}"
 export DRY_RUN="${DRY_RUN:-false}"
 export SONIOX_LANGUAGE_HINTS_STRICT="${SONIOX_LANGUAGE_HINTS_STRICT:-true}"
@@ -39,6 +51,8 @@ export SONIOX_ENDPOINT_DETECTION="${SONIOX_ENDPOINT_DETECTION:-true}"
 export SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL="${SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL:-0}"
 export SONIOX_ENDPOINT_SENSITIVITY="${SONIOX_ENDPOINT_SENSITIVITY:--1}"
 export SONIOX_MAX_ENDPOINT_DELAY_MS="${SONIOX_MAX_ENDPOINT_DELAY_MS:-3000}"
+export SONIOX_CLOSE_TIMEOUT_MS=1500
+export SONIOX_TIMEOUT_MS=22000
 export SCRIBE_VAD_TUNING=true
 export SCRIBE_ENABLED="${SCRIBE_ENABLED:-true}"
 export SCRIBE_HOST="${SCRIBE_HOST:-api.elevenlabs.io}"
@@ -81,6 +95,8 @@ if [ -f "$LAUNCHD_PLIST" ]; then
   plist_set_env SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL 0
   plist_set_env SONIOX_ENDPOINT_SENSITIVITY -1
   plist_set_env SONIOX_MAX_ENDPOINT_DELAY_MS 3000
+  plist_set_env SONIOX_CLOSE_TIMEOUT_MS 1500
+  plist_set_env SONIOX_TIMEOUT_MS 22000
   plist_set_env SCRIBE_VAD_TUNING true
   plist_set_env SCRIBE_BATCH_ENABLED "$SCRIBE_BATCH_ENABLED"
   plist_set_env SCRIBE_VERBATIM "$SCRIBE_VERBATIM"
@@ -88,9 +104,11 @@ if [ -f "$LAUNCHD_PLIST" ]; then
   plist_set_env SCRIBE_VAD_THRESHOLD 0.4
   plist_set_env SCRIBE_MIN_SPEECH_DURATION_MS 100
   plist_set_env SCRIBE_MIN_SILENCE_DURATION_MS 100
-  if /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:SCRIBE_KEYTERMS" "$LAUNCHD_PLIST" >/dev/null 2>&1; then
-    /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:SCRIBE_KEYTERMS" "$LAUNCHD_PLIST" >/dev/null
-  fi
+  for key in "${obsolete_env[@]}"; do
+    if /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$LAUNCHD_PLIST" >/dev/null 2>&1; then
+      /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:$key" "$LAUNCHD_PLIST" >/dev/null
+    fi
+  done
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
 fi
 

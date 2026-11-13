@@ -3,6 +3,7 @@ import https from "node:https";
 import type { IncomingHttpHeaders, IncomingMessage, ServerResponse } from "node:http";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import type { UpstreamResponse } from "./types.js";
+import { CONNECT_TIMEOUT_MS, FILE_ATTEMPT_TIMEOUT_MS, isRetryable, MAX_RETRIES, type FileRetries } from "./retry.js";
 
 const HOP_BY_HOP = new Set([
   "connection",
@@ -154,6 +155,7 @@ export interface ForwardRequest {
   bodyStream?: IncomingMessage;
   timeoutMs: number;
   agent?: https.Agent;
+  retry?: FileRetries;
 }
 
 export interface StreamingForwardResult {
@@ -229,9 +231,10 @@ export async function forwardStreamingRequest(
 }
 
 export async function forwardRequest(req: ForwardRequest): Promise<UpstreamResponse> {
-  const resolved = await resolveRealHost(req.hostname);
-
-  return new Promise<UpstreamResponse>((resolve, reject) => {
+  for (;;) {
+    try {
+      req.retry?.signal.throwIfAborted();
+      const result = await new Promise<UpstreamResponse>((resolve, reject) => {
     const request = https.request(
       {
         hostname: req.hostname,
@@ -244,6 +247,7 @@ export async function forwardRequest(req: ForwardRequest): Promise<UpstreamRespo
         rejectUnauthorized: true,
         lookup: lookupBypassingHosts as never,
         timeout: req.timeoutMs,
+        signal: req.retry?.signal,
       },
       (response) => {
         const chunks: Buffer[] = [];
@@ -268,7 +272,29 @@ export async function forwardRequest(req: ForwardRequest): Promise<UpstreamRespo
       request.destroy(new Error(`upstream timeout after ${req.timeoutMs}ms`));
     });
     request.on("error", (err) => reject(err));
+    if (req.retry) {
+      const timeoutError = () => Object.assign(new Error("file request timeout"), { code: "ETIMEDOUT" });
+      const connectTimer = setTimeout(() => request.destroy(timeoutError()), CONNECT_TIMEOUT_MS);
+      const attemptTimer = setTimeout(() => request.destroy(timeoutError()), FILE_ATTEMPT_TIMEOUT_MS);
+      request.once("socket", (socket) => {
+        if (request.reusedSocket) clearTimeout(connectTimer);
+        else socket.once("secureConnect", () => clearTimeout(connectTimer));
+      });
+      request.once("close", () => {
+        clearTimeout(connectTimer);
+        clearTimeout(attemptTimer);
+      });
+    }
     if (req.body.length > 0) request.write(req.body);
     request.end();
-  });
+      });
+      if (req.retry && isRetryable({ status: result.status })) {
+        throw Object.assign(new Error(`upstream HTTP ${result.status}`), { status: result.status });
+      }
+      return result;
+    } catch (err) {
+      if (!req.retry || req.retry.signal.aborted || !isRetryable(err) || req.retry.count >= MAX_RETRIES) throw err;
+      req.retry.count += 1;
+    }
+  }
 }

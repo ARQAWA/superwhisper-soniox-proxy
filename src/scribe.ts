@@ -5,6 +5,12 @@ import type { AppConfig } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
+import {
+  CONNECT_TIMEOUT_MS,
+  isRetryable,
+  MAX_RETRIES,
+  REALTIME_RETRY_TIMEOUT_MS,
+} from "./retry.js";
 import { redactQuery } from "./url-utils.js";
 import { elevenLabsAgent } from "./warmup.js";
 
@@ -189,15 +195,11 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
   let binaryFrames = 0;
   let binaryBytes = 0;
   const connectStartedAt = Date.now();
-
-  const upstream = new WebSocket(target, {
-    headers: copyUpstreamHeaders(req),
-    agent: elevenLabsAgent,
-    perMessageDeflate: false,
-    handshakeTimeout: 10_000,
-    rejectUnauthorized: true,
-    servername: host,
-  } as never);
+  const deadline = connectStartedAt + REALTIME_RETRY_TIMEOUT_MS;
+  let upstream: WebSocket | undefined;
+  let openingTimer: ReturnType<typeof setTimeout> | undefined;
+  let attempts = 0;
+  let stopped = false;
 
   logger.info(
     {
@@ -238,8 +240,10 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
       { request_id: requestId, kind: isBinary ? "binary" : "text", bytes: rawByteLength(data) },
       "scribe ws client frame",
     );
-    if (upstreamOpen) upstream.send(data, { binary: isBinary });
-    else pending.push({ data, isBinary });
+    if (stopped) return;
+    if (upstreamOpen) {
+      if (upstream?.readyState === WebSocket.OPEN) upstream.send(data, { binary: isBinary });
+    } else pending.push({ data, isBinary });
   });
 
   client.on("close", (code, reason) => {
@@ -255,44 +259,112 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
       },
       "scribe ws client closed",
     );
-    upstream.close();
+    stopped = true;
+    clearTimeout(openingTimer);
+    pending.length = 0;
+    if (upstreamOpen) upstream?.close();
+    else upstream?.terminate();
   });
 
   client.on("error", (err) => {
     logger.warn({ request_id: requestId, error: errorLabel(err) }, "scribe ws client error");
   });
 
-  upstream.on("open", () => {
-    upstreamOpen = true;
-    diagnostics.recordRequestParameters("scribe", requestParameters(upstreamUrl));
-    logger.info(
-      { request_id: requestId, connect_ms: Date.now() - connectStartedAt },
-      "scribe ws upstream open",
-    );
-    for (const frame of pending) upstream.send(frame.data, { binary: frame.isBinary });
-    pending.length = 0;
-  });
+  function connect(): void {
+    if (stopped || client.readyState !== WebSocket.OPEN) return;
+    const remaining = Math.min(CONNECT_TIMEOUT_MS, deadline - Date.now());
+    if (remaining <= 0) {
+      stopped = true;
+      pending.length = 0;
+      client.close(1011, "scribe upstream timeout");
+      return;
+    }
+    attempts += 1;
+    const attemptDeadline = Math.min(deadline, Date.now() + remaining);
+    const socket = new WebSocket(target, {
+      headers: copyUpstreamHeaders(req),
+      agent: elevenLabsAgent,
+      perMessageDeflate: false,
+      handshakeTimeout: remaining,
+      rejectUnauthorized: true,
+      servername: host,
+    } as never);
+    upstream = socket;
+    let openingError: unknown;
+    openingTimer = setTimeout(() => {
+      openingError = Object.assign(new Error("Scribe opening handshake timed out"), {
+        code: "ETIMEDOUT",
+      });
+      socket.terminate();
+    }, Math.max(0, attemptDeadline - Date.now()));
 
-  upstream.on("message", (data, isBinary) => {
-    logger.debug(
-      { request_id: requestId, kind: isBinary ? "binary" : "text", bytes: rawByteLength(data) },
-      "scribe ws upstream frame",
-    );
-    forwardScribeFrame(client as unknown as ScribeFrameSink, data, isBinary);
-  });
+    socket.on("open", () => {
+      clearTimeout(openingTimer);
+      // The single-use token is consumed on open: never reconnect after this point.
+      upstreamOpen = true;
+      if (stopped || client.readyState !== WebSocket.OPEN || Date.now() >= attemptDeadline) {
+        stopped = true;
+        pending.length = 0;
+        socket.terminate();
+        if (client.readyState === WebSocket.OPEN) client.close(1011, "scribe upstream timeout");
+        return;
+      }
+      diagnostics.recordRequestParameters("scribe", requestParameters(upstreamUrl));
+      logger.info(
+        { request_id: requestId, connect_ms: Date.now() - connectStartedAt },
+        "scribe ws upstream open",
+      );
+      for (const frame of pending) socket.send(frame.data, { binary: frame.isBinary });
+      pending.length = 0;
+    });
 
-  upstream.on("close", (code, reason) => {
-    logger.info(
-      { request_id: requestId, code, reason_bytes: reason.length },
-      "scribe ws upstream closed",
-    );
-    if (client.readyState !== WebSocket.OPEN) return;
-    if (code === 1000 || code === 1005) client.close(1000);
-    else client.close(1011, "scribe upstream closed");
-  });
+    socket.on("message", (data, isBinary) => {
+      if (stopped || upstream !== socket) return;
+      logger.debug(
+        { request_id: requestId, kind: isBinary ? "binary" : "text", bytes: rawByteLength(data) },
+        "scribe ws upstream frame",
+      );
+      forwardScribeFrame(client as unknown as ScribeFrameSink, data, isBinary);
+    });
 
-  upstream.on("error", (err) => {
-    logger.warn({ request_id: requestId, error: errorLabel(err) }, "scribe ws upstream error");
-    if (client.readyState === WebSocket.OPEN) client.close(1011, "scribe upstream error");
-  });
+    socket.on("unexpected-response", (_request, response) => {
+      openingError = Object.assign(new Error(`Unexpected server response: ${response.statusCode}`), {
+        status: response.statusCode,
+      });
+      socket.terminate();
+    });
+
+    socket.on("close", (code, reason) => {
+      if (upstream !== socket) return;
+      clearTimeout(openingTimer);
+      logger.info(
+        { request_id: requestId, code, reason_bytes: reason.length },
+        "scribe ws upstream closed",
+      );
+      if (stopped || client.readyState !== WebSocket.OPEN) return;
+      if (!upstreamOpen) {
+        const error = openingError ?? Object.assign(new Error("Scribe handshake closed"), {
+          code: "ECONNRESET",
+        });
+        if (attempts <= MAX_RETRIES && Date.now() < deadline && isRetryable(error)) {
+          connect();
+          return;
+        }
+        stopped = true;
+        pending.length = 0;
+        client.close(1011, "scribe upstream error");
+      } else if (code === 1000 || code === 1005) client.close(1000);
+      else client.close(1011, "scribe upstream closed");
+    });
+
+    socket.on("error", (err) => {
+      openingError ??= err;
+      logger.warn({ request_id: requestId, error: errorLabel(err) }, "scribe ws upstream error");
+      if (upstreamOpen && client.readyState === WebSocket.OPEN) {
+        client.close(1011, "scribe upstream error");
+      }
+    });
+  }
+
+  connect();
 }

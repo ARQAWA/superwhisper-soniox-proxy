@@ -16,6 +16,7 @@ import { describeSchema, loadTemplate, renderDeepgramLikeResponse, sanitizeForTe
 import type { ParsedMultipart, RequestMeta, RequestSummary } from "./types.js";
 import { forwardRequest, forwardStreamingRequest, resolveRealHost } from "./upstream.js";
 import { redactQuery } from "./url-utils.js";
+import { FILE_TIMEOUT_MS } from "./retry.js";
 import {
   createWarmup,
   elevenLabsAgent,
@@ -376,6 +377,7 @@ export function createRequestHandler(deps: ProxyDeps) {
           body: rewritten ? rewritten.body : body,
           timeoutMs: config.UPSTREAM_TIMEOUT_MS,
           agent: superwhisperAgent,
+          retry: { signal: AbortSignal.timeout(FILE_TIMEOUT_MS), count: 0 },
         });
         sendUpstreamResponse(res, upstream);
         logger.info(

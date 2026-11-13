@@ -13,6 +13,7 @@ import { errorLabel } from "./errors.js";
 import { sonioxLanguagePolicy, type SonioxLanguagePolicy } from "./language.js";
 import type { Logger } from "./logger.js";
 import type { ParsedFile } from "./types.js";
+import { CONNECT_TIMEOUT_MS, FILE_TIMEOUT_MS } from "./retry.js";
 import { createWarmFetch } from "./warmup.js";
 
 export interface SonioxResult {
@@ -197,6 +198,7 @@ export class SonioxService {
     endpointLatencyAdjustmentLevel: number;
     maxEndpointDelayMs: number;
     clientReferenceId: string;
+    connectTimeoutMs?: number;
   }): RealtimeSttSession {
     const parameters = {
       model: this.config.SONIOX_REALTIME_MODEL,
@@ -218,7 +220,9 @@ export class SonioxService {
           }
         : {}),
     };
-    const session = this.client.realtime.stt(parameters);
+    const session = this.client.realtime.stt(parameters, {
+      connect_timeout_ms: options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+    });
     session.on("connected", () => {
       this.diagnostics?.recordRequestParameters(
         "soniox",
@@ -240,12 +244,22 @@ export class SonioxService {
     const clientReferenceId = `sw-${randomUUID()}`;
     await this.semaphore.acquire();
     const started = Date.now();
+    const signal = AbortSignal.timeout(Math.min(this.config.SONIOX_TIMEOUT_MS, FILE_TIMEOUT_MS));
+    const client = new SonioxNodeClient({
+      api_key: this.config.sonioxApiKey!,
+      http_client: new FetchHttpClient({
+        base_url: this.config.SONIOX_API_BASE_URL,
+        default_headers: { Authorization: `Bearer ${this.config.sonioxApiKey}`, "Content-Type": "application/json" },
+        fetch: createWarmFetch(this.config.SONIOX_API_BASE_URL, { signal, count: 0 }),
+      }),
+    });
     try {
-      const transcription = await this.client.stt.transcribe({
+      const transcription = await client.stt.transcribe({
         model: this.config.SONIOX_MODEL,
         file: audio.data,
         filename: audio.filename,
         wait: true,
+        signal,
         cleanup: ["file", "transcription"],
         client_reference_id: clientReferenceId,
         ...recognitionSettings(this.config, this.context, {

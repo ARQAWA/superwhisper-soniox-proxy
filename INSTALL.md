@@ -22,7 +22,7 @@ Run this on the other Mac:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh
-bash /tmp/install.sh --upgrade
+bash /tmp/install.sh --upgrade --reset-context
 ```
 
 The installer:
@@ -31,7 +31,13 @@ The installer:
 2. Fast-forwards `main` and rebuilds `dist/`.
 3. Reuses or renews certificates.
 4. Restarts the proxy and applies the current profile.
-5. Preserves the Soniox key, context prompt, diagnostics, and SuperWhisper.
+5. Backs up and replaces the recognition prompt with the current profile.
+6. Removes obsolete fallback settings from the proxy LaunchAgent.
+7. Preserves the Soniox key, valid certificates, diagnostics, and SuperWhisper.
+
+Use the command above for this update. Without `--reset-context`, an upgrade
+keeps the existing recognition prompt. Do not add `--smoke`; dictation is
+checked by the user.
 
 Do not run as root. Do not reset a dirty checkout. Ask the user before using
 `--clean`.
@@ -43,9 +49,10 @@ curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/ma
 bash /tmp/install.sh --clean
 ```
 
-`--clean` removes the old checkout, backs up the old context prompt, and writes
-the current profile. It preserves the Soniox key and certificates. It never
-touches SuperWhisper.
+`--clean` removes the entire old checkout, including certificates and logs
+stored inside it. It backs up the context prompt and writes the current
+profile. The Keychain key is preserved. Do not use it for a normal update.
+It never touches SuperWhisper.
 
 ## Verify
 

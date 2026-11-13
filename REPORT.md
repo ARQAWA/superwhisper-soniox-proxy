@@ -3,6 +3,17 @@
 Date: 2026-11-07
 Environment: macOS, SuperWhisper 3.2.1, Node.js 26.7.0, Soniox `stt-async-v6` / `stt-rt-v6`
 
+> **2026-11-13 single-session update:** Nova realtime now uses one Soniox
+> session only, with no prefix async batch, reconnect/replay, full-recording
+> batch recovery, or empty holding interims. Connection/session/send/finish
+> failures clear the live interim and close the client with `1011`.
+> At `CloseStream`, a connected session finishes gracefully and awaits the full
+> `finished` response, even when decoding is behind. `SONIOX_CLOSE_TIMEOUT_MS`
+> defaults to `1500` ms (range `250`-`60000`); timeout is an error, not a retry.
+> Explicit client file requests remain normal batch; the app may issue them
+> independently. Historical recovery results below are superseded, not
+> verification of this change. No new tests or live checks were run for this update.
+
 > **2026-11-10 update:** app configuration and mode detection were removed. The
 > installer and proxy never read or modify SuperWhisper. Sections below that
 > mention mode files or app defaults are historical recon, not current behavior.
@@ -41,10 +52,10 @@ The proxy is selected by a macOS PAC file (`127.0.0.1:8443/proxy.pac`) that rout
 
 1. Accept the WSS upgrade on `api.deepgram.com/v1/listen`.
 2. Detect target traffic from the query model only (`nova-2`/`nova-3`).
-3. Open a Soniox `stt-rt-v6` session with `pcm_s16le`, 16 kHz, mono, endpoint detection on by default (conservative Soniox settings; disabled for diarization).
+3. Open one Soniox `stt-rt-v6` session with `pcm_s16le`, 16 kHz, mono, endpoint detection on by default (conservative Soniox settings; disabled for diarization).
 4. Forward binary PCM frames; handle `CloseStream`, `Finalize`, `KeepAlive`.
 5. Accumulate finalized Soniox tokens across the sliding window.
-6. Emit Deepgram-shaped interim `Results`, one final `Results` at close, then `Metadata`, then close.
+6. Emit Deepgram-shaped interim `Results`; after graceful finish completes, emit one final `Results`, then `Metadata`, then close. Failure or finish timeout clears the interim and closes with `1011`, without a partial final or automatic reprocessing.
 7. Never open an upstream Deepgram socket for target traffic.
 
 ## Verification
@@ -86,6 +97,9 @@ The app's realtime recordings after the fix completed in 12–66 ms (`processing
 
 ### Reliability regression and fix (2026-11-08)
 
+Historical implementation and verification, superseded by the single-session
+update above. The removed recovery paths and their settings must not be enabled.
+
 Later real sessions showed Soniox falling behind live audio while the app waited for the final. Examples from diagnostics:
 
 | Request | Audio | Close text | Outcome |
@@ -94,7 +108,7 @@ Later real sessions showed Soniox falling behind live audio while the app waited
 | `ef90fedc` | 53.14 s | 289 chars | App closed at ~1.5 s; 302 chars lost from the final |
 | `0ded010d` | 14.63 s | 73 chars | Lag at close; error `1011` instead of a partial final |
 
-The bridge now applies these rules:
+The historical bridge applied these rules:
 
 1. Probe lag every second. If Soniox is more than `SONIOX_RECONNECT_LAG_MS` behind for 1.5 s, or the session errors, open a fresh Soniox session and replay buffered audio from the last **safely finalized token** with `SONIOX_RECONNECT_OVERLAP_MS` overlap. The resume point is moved forward to the start of any final token crossing it, so a token/word is never cut: that token is discarded and transcribed again from its beginning. If the 64 MiB audio buffer is incomplete, reconnect/recovery is disabled and the final is not sent.
 2. Never send a partial final. If the app is about to stop and the realtime session is behind, silent, or missing its prefix batch, transcribe the full buffered PCM with `stt-async-v6` and keep the proxy side of the socket open with empty interim `Results` until the batch result is ready (`SONIOX_CLOSE_RECOVERY_MS`). Whether SuperWhisper itself waits is not yet verified.
@@ -110,6 +124,9 @@ Verification:
 
 ### Realtime tuning (2026-11-08)
 
+Historical measurements. Endpointing and keepalive remain supported; the
+fallback paths described in this section have been removed.
+
 Soniox guidance reviewed: [real-time transcription](https://soniox.com/docs/stt/rt/real-time-transcription), [endpoint detection](https://soniox.com/docs/stt/rt/endpoint-detection), [manual finalization](https://soniox.com/docs/stt/rt/manual-finalization), [connection keepalive](https://soniox.com/docs/stt/rt/connection-keepalive), [WebSocket API](https://docs.soniox.com/api-reference/stt/websocket-api), and [pricing](https://soniox.com/pricing).
 
 Changes:
@@ -117,7 +134,7 @@ Changes:
 - Enabled Soniox endpoint detection with its conservative defaults (`endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`, `max_endpoint_delay_ms=2000`). The SDK filters `<end>`/`<fin>` tokens, so the app's text contract is unchanged. Endpoint detection is disabled when the app requests diarization, because Soniox documents that it reduces diarization accuracy.
 - Added an idle keepalive: after `SONIOX_KEEPALIVE_MS` (default 10 s) without binary audio, the bridge sends `{"type":"keepalive"}`. This prevents Soniox's 20 s audio-idle timeout from ending a paused dictation. The stream stays billable while held open.
 - Added `client_reference_id: sw-rt-<requestId>` so realtime requests can be matched with Soniox usage logs.
-- Kept the existing slow-handshake prefix batch, sustained-lag reconnect, and full batch recovery. They are the reliability premium; they are not on the normal path.
+- At that time, kept the slow-handshake prefix batch, sustained-lag reconnect, and full batch recovery. All three paths are now removed.
 
 Verification:
 
@@ -127,7 +144,7 @@ Verification:
 - 22 s idle smoke with no app audio or app keepalive: two `keepalive_sent` events at 10.2 s and 10.0 s idle, then a complete 85-char / 11-word final. This proves the proxy keeps the Soniox stream alive past its 20 s audio timeout.
 - Close-to-finish in the three optimized smokes: 222 ms, 248 ms, and 203 ms; no batch recovery was needed.
 
-The defaults add no per-stream Soniox charge. The fallback cost remains opt-in by failure: before this tuning, diagnostics recorded prefix batches in 8 of 114 sessions and no full batch recoveries or reconnects. See the README tradeoff table for the cost/latency/accuracy alternatives.
+Before this historical tuning, diagnostics recorded prefix batches in 8 of 114 sessions and no full batch recoveries or reconnects. Those fallback paths no longer exist. See the README tradeoff table for the current single-session policy.
 
 ### Fast auto diagnosis (2026-11-09)
 

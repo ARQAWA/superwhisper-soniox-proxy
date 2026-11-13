@@ -16,10 +16,26 @@ This installs the local proxy that makes SuperWhisper's built-in **Nova 3** voic
 
 Repository: <https://github.com/ARQAWA/superwhisper-soniox-proxy>
 
+## Update an existing Mac
+
+Use this for the current update, without a full reinstall:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh
+bash /tmp/install.sh --upgrade --reset-context
+```
+
+This updates the code, rebuilds `dist/`, replaces the recognition prompt
+(keeping its existing backup behavior), removes obsolete fallback settings
+from the owned LaunchAgent, and restarts the proxy with the current profile.
+Valid certificates and the Keychain key are kept. Do not add `--smoke`, remove
+unrelated files, or touch SuperWhisper. The user checks dictation.
+If local changes block the update, report them; do not switch to `--clean`.
+
 ## Clean reinstall (agent procedure)
 
-Use this when the user asks for a clean reinstall or says the recognition
-prompt is stale.
+Use this only when the user explicitly asks for a full clean reinstall.
+For a stale recognition prompt, use `--upgrade --reset-context` above.
 
 The clean path deletes the installed proxy checkout and replaces the proxy
 recognition prompt. It never reads or modifies SuperWhisper.
@@ -40,8 +56,9 @@ bash /tmp/install.sh --clean
 4. Clones `main` into the install directory and installs locked dependencies.
 5. Applies and verifies the quality profile.
 
-The old context prompt is kept in a timestamped backup file. The Soniox key,
-certificates, recordings, and every SuperWhisper mode or setting are untouched.
+The old context prompt is kept in a timestamped backup file. The Keychain key
+and SuperWhisper are untouched. Certificates and logs inside the deleted
+checkout are removed too; certificates are recreated by setup.
 
 The installer does not require SuperWhisper to be installed.
 
@@ -70,8 +87,8 @@ The installer will:
     a free-text Soniox prompt, verbatim Scribe output, and a `1 s` Scribe VAD.
 
 The installer never reads or modifies SuperWhisper. An existing context prompt
-and existing Soniox LaunchAgent settings are preserved. Use `--clean` when the
-recognition prompt must be replaced.
+and supported Soniox LaunchAgent settings are preserved. Use `--reset-context`
+when the recognition prompt must be replaced.
 
 After installation, create or select a SuperWhisper mode yourself. Use the
 built-in **Nova 3** voice model for Soniox, or the built-in **Scribe** voice
@@ -145,6 +162,20 @@ The Nova picker has no automatic option. Selecting Hindi (`hi`) makes the proxy
 omit `language_hints` and enable Soniox language identification.
 `SONIOX_AUTO_LANGUAGE` changes the sentinel.
 
+Nova realtime retries temporary failures through realtime only, never through
+prefix async batches or full-recording batch recovery. There are at most
+10 retries after the first attempt, with a 1 s connection limit and a 5 s
+recovery budget. The buffered audio is replayed on the replacement session.
+Scribe retries opening handshakes only; its token is consumed after opening.
+At `CloseStream`, a connected session finishes gracefully and awaits the full
+`finished` response, even if decoding is behind. `SONIOX_CLOSE_TIMEOUT_MS`
+defaults to `1500` ms (range `250`-`60000`); timeout returns an error.
+Explicit file `POST` requests remain normal batch. The app may independently
+issue a file request after a realtime error; the proxy does not control client
+retries or UI fallback.
+File requests use a 1 s connection limit, 5 s per HTTP attempt, and a shared
+22 s upload/transcription budget. Exhausted retries or deadlines return an error.
+
 The managed prompt in `~/.config/soniox-proxy/context.json` is sent as Soniox
 `context`. Only `text` is used; `terms` and `general` are ignored because
 provider term lists were rewriting ordinary words. Write a short background in
@@ -204,9 +235,8 @@ The upgrade path preserves user changes:
 
 If the checkout has local changes or divergent history, stop and ask the user before resolving them. Do not use `git reset --hard` or forced checkout. The installer keeps the Soniox key, diagnostic traces, SuperWhisper recordings, and unrelated LaunchAgents.
 
-Use `--clean` instead of a plain re-run when the recognition prompt must be
-rebuilt. A normal upgrade keeps it, so stale terms or an old prompt survive by
-design.
+Add `--reset-context` when the recognition prompt must be rebuilt. A plain
+upgrade keeps it, so stale terms or an old prompt survive by design.
 
 If the root must be replaced, setup verifies the new root and leaf before cleaning up the replaced login-keychain root. macOS may request trust approval. Do not remove unrelated trusted roots or force a replacement merely for an upgrade.
 
@@ -265,7 +295,8 @@ If the CA was also trusted in the System keychain, the script prints the `sudo` 
 | Installer cannot prompt for the key | Download and run the script directly instead of piping it: `curl -o /tmp/install.sh ... && bash /tmp/install.sh`. |
 | SuperWhisper does not trust the proxy | Run `bash scripts/health.sh` and approve the macOS certificate dialog. Do not modify SuperWhisper. |
 | LaunchAgent does not become healthy | Inspect `logs/proxy.stderr.log`; use the explicit `--no-launchd` option only if the user accepts nohup mode. |
-| Realtime falls back to batch | Check `logs/proxy.log` for `soniox realtime connected` / `CloseStream`; confirm the realtime query model is `nova-2` or `nova-3`. |
+| File request follows a realtime error | Check `logs/proxy.log` for a separate client `POST` to Nova `/v1/listen` or Scribe `/elevenlabs/v1/transcribe`. The proxy never converts realtime to batch; client retries and UI behavior are outside its control. |
+| Realtime returns an error | Check connection/session/send/finish failures and `SONIOX_CLOSE_TIMEOUT_MS` in `logs/proxy.log`. Exhausted retries close with `1011`, without batch recovery; confirm the query model is `nova-2` or `nova-3`. |
 | Realtime hangs or cuts the end | Run `bash scripts/diagnostics.sh`; review `client_closed_before_final` and `close_to_finish_ms` in `~/Library/Caches/soniox-proxy/diagnostics/`. |
 | Batch is slow | Soniox async processing p95 is around 4 s; realtime dictation avoids it. |
 | CA expired | Run `bash scripts/setup.sh --no-install --skip-proxy --launchd`, then `bash scripts/start-fast.sh` (renews, re-trusts, and restores the profile). |

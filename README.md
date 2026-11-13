@@ -152,7 +152,7 @@ Every proxy start writes private telemetry outside the repository:
 └── sessions/YYYY-MM-DD/      # per-stream JSONL timelines
 ```
 
-The realtime trace records connect time, audio frame counts and gaps, Soniox result counts and processing progress, `CloseStream`, finalization latency, the final result size, and the client close code. The summary gives every stream a status such as `ok`, `client_closed_before_final`, `connect_failed`, or `final_sent_after_safety_net`.
+The realtime trace records connect time, audio frame counts and gaps, Soniox result counts and processing progress, `CloseStream`, finalization latency, the final result size, and the client close code. The summary gives every stream a status such as `ok`, `client_closed_before_final`, or `connect_failed`. Older traces may contain recovery statuses from the removed fallback implementation.
 
 Session telemetry stores counts, lengths, timings, and close codes. The private parameter log also records Scribe query settings and the Soniox SDK input object, not a captured Soniox wire frame. Tokens, recognized sensitive fields, and user-specific keyterms are redacted; audio frames and response transcripts are not recorded. Directory mode is `700`, files are `600`.
 
@@ -204,13 +204,7 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL` | `0` | Endpoint latency profile, `0`–`3` |
 | `SONIOX_MAX_ENDPOINT_DELAY_MS` | `3000` | Hard upper bound after speech ends, `500`–`3000` |
 | `SONIOX_KEEPALIVE_MS` | `10000` | Send Soniox keepalive after this much audio silence; `0` disables |
-| `SONIOX_PREFIX_BATCH_CONNECT_MS` | `1200` | If Soniox connects slower, send queued audio through batch instead of a burst (`0` disables) |
-| `SONIOX_RECONNECT_LAG_MS` | `4000` | Reconnect when Soniox is this far behind live audio |
-| `SONIOX_RECONNECT_MAX` | `3` | Maximum reconnect attempts per dictation |
-| `SONIOX_RECONNECT_OVERLAP_MS` | `500` | Audio overlap replayed after reconnect |
-| `SONIOX_CLOSE_ERROR_LAG_MS` | `2000` | At `CloseStream`, start full batch recovery if Soniox is this far behind |
-| `SONIOX_CLOSE_BATCH_DELAY_MS` | `1000` | If no final arrives, start full batch recovery after this delay |
-| `SONIOX_CLOSE_RECOVERY_MS` | `15000` | Max time to wait for full batch recovery before returning an error |
+| `SONIOX_CLOSE_TIMEOUT_MS` | `1500` | Wait for graceful realtime finish after `CloseStream`, `250`-`60000` ms; timeout returns an error |
 | `SONIOX_LANGUAGE_HINTS` | `ru,en` | Fallback language hints |
 | `SONIOX_LANGUAGE_HINTS_STRICT` | `true` | Use `language_hints_strict` when there is one explicit hint |
 | `SONIOX_AUTO_LANGUAGE` | `hi` | Picker sentinel that switches Soniox to automatic language detection |
@@ -251,7 +245,11 @@ Endpoint detection is enabled by default with Soniox's quality-first settings (`
 
 If no binary audio frame arrives for `SONIOX_KEEPALIVE_MS` (default 10 s), the bridge sends Soniox's `{"type":"keepalive"}` control. Soniox ends an audio-idle stream after 20 s; this preserves context through a long pause. Soniox bills the full stream duration, so a kept-open stream still accrues cost; set `SONIOX_KEEPALIVE_MS=0` to disable this behavior.
 
-At `CloseStream`, the bridge uses Soniox's graceful empty-text finish and waits for the `finished` response. It does not send a manual `finalize` at close; the app's own `Finalize` control is forwarded when present.
+Each Nova realtime request uses one Soniox realtime session. Audio queued during the initial connection is sent to that same session. The proxy does not create prefix async jobs, reconnect or replay audio, reprocess the full recording, or send empty holding interims.
+
+At `CloseStream`, a connected session uses Soniox's graceful empty-text finish and waits for the full `finished` response, even if decoding is behind live audio. Lag alone is not an immediate close failure. `SONIOX_CLOSE_TIMEOUT_MS` (default 1500 ms, range 250-60000 ms) bounds that wait. The bridge does not send a manual `finalize` at close; the app's own `Finalize` control is forwarded when present.
+
+Connection, session, audio-send, and finish failures, including a finish timeout, clear the live interim and close the client with code `1011` instead of returning a partial final or retrying. Explicit file `POST` requests remain normal batch requests. The app may issue a separate file request after an error; the proxy neither creates that request from the realtime session nor controls the app's retry or UI behavior.
 
 ### Cost and reliability tradeoffs
 
@@ -261,12 +259,9 @@ At `CloseStream`, the bridge uses Soniox's graceful empty-text finish and waits 
 | Endpoint level `2`, sensitivity `0.3`, max `1500` | Lower endpoint latency than the defaults | More segments and a larger accuracy risk; opt-in only |
 | Endpoint off for diarization | Best diarization accuracy | No endpoint latency benefit |
 | Keepalive every 10 s | Survives pauses longer than Soniox's 20 s audio timeout | Billed stream duration continues while the pause lasts |
-| Prefix batch after a slow handshake | Prevents a large queued burst from leaving realtime permanently behind | Duplicate async cost for the queued prefix; measured 8 of 114 sessions before this tuning |
-| Reconnect on sustained lag | Recovers a live stream that is behind | New realtime stream plus overlap; duplicates a short span |
-| Full batch recovery at close | Never sends a partial final | Duplicates the whole recording with async STT; only on failure |
-| `SONIOX_PREFIX_BATCH_CONNECT_MS=0`, `SONIOX_RECONNECT_MAX=0` | Minimum calls | Tail-loss risk when the handshake or live stream stalls |
+| One realtime session, error-only failure handling | No proxy retries, replay, or duplicate batch processing | A failed or timed-out session returns an error instead of a recovered transcript |
 
-Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/hour` async. The reliability fallbacks therefore add only a small premium when they trigger; they are retained because the app closes about 1.5 s after stop and a lost tail cannot be recovered later.
+Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/hour` async. The proxy never adds async processing to a realtime session. Separate file requests made by the client are processed and billed independently.
 
 ### Quality profile
 
@@ -285,7 +280,8 @@ and `max_endpoint_delay_ms=3000`, more conservative than the defaults from the
 This profile favors recognition accuracy over latency: the model waits for
 more context before committing a segment and splits speech into fewer pieces.
 At `CloseStream` the bridge calls Soniox's graceful finish and waits for the
-final result, so the longer endpoint delay does not strand the tail.
+full result within `SONIOX_CLOSE_TIMEOUT_MS`; a timeout returns an error,
+not a partial final or a batch retry.
 When the request has one explicit language hint (`ru`), the proxy also sends
 `language_hints_strict=true`, following Soniox's single-language guidance.
 Automatic and multi-language requests stay non-strict.
@@ -312,10 +308,6 @@ after a restart does not pay for DNS or a TLS handshake.
 
 The same values are written to the owned LaunchAgent. A nohup-only setup applies
 until logout or reboot. The proxy never reads or modifies SuperWhisper.
-
-If the Soniox WebSocket handshake takes longer than `SONIOX_PREFIX_BATCH_CONNECT_MS` (default 1200 ms), the audio queued during the handshake is transcribed with `stt-async-v6` instead of being burst into the realtime session. The realtime session then starts at the live edge. A burst would leave Soniox permanently behind live audio, and the app closes before the tail is finalized. The prefix tokens are prepended to the same transcript, with live token timestamps shifted by the prefix duration. Diagnostics record `prefix_batch_*` events and `prefix_missing_at_final` if the prefix is still pending at close.
-
-The bridge never sends a partial final. If Soniox is more than `SONIOX_RECONNECT_LAG_MS` behind live audio, it closes the current realtime session, opens a new one, and replays buffered audio from the last safely finalized token (`SONIOX_RECONNECT_OVERLAP_MS` overlap). At `CloseStream`, if the realtime session is still behind or does not finish within `SONIOX_CLOSE_BATCH_DELAY_MS`, the proxy transcribes the **entire recording** with `stt-async-v6` and keeps its side of the app socket open with empty interim `Results` for up to `SONIOX_CLOSE_RECOVERY_MS`. Only the full batch transcript is sent as the final segment. If recovery fails or times out, the proxy clears the live interim, closes with code `1011`, and the app can use its own retry/batch fallback instead of pasting truncated text. **Unverified:** whether SuperWhisper resets its ~1.5 s post-`CloseStream` timeout when it receives those empty interims is not yet proven with the real app. If it closes first, the proxy cannot deliver the recovered final; diagnostics record `client_closed_during_recovery` for that case.
 
 ## Scribe details
 
@@ -377,7 +369,8 @@ If the CA was installed in the System keychain, teardown prints the `sudo` comma
 | Symptom | Check |
 | --- | --- |
 | App says it cannot connect / TLS error | `bash scripts/health.sh`; re-run `scripts/setup.sh` then `scripts/start-fast.sh` after trust changes |
-| Batch works, realtime falls back to batch | `tail -f logs/proxy.log` for `soniox realtime connected`, `CloseStream`, `finished`; confirm the realtime request model is `nova-2` or `nova-3` |
+| File request follows a realtime error | Inspect `logs/proxy.log` for the realtime close and a separate client `POST`; the proxy never turns realtime into batch. Nova file requests use `/v1/listen`; Scribe uses `/elevenlabs/v1/transcribe`. Client retries and UI behavior are outside the proxy's control. |
+| Realtime returns an error | Check `soniox realtime connected`, `CloseStream`, and `finished` in `logs/proxy.log`; a connection/session/send/finish failure or `SONIOX_CLOSE_TIMEOUT_MS` timeout closes with `1011`, without retry or reprocessing. Confirm the realtime query model is `nova-2` or `nova-3`. |
 | Realtime text looks truncated | Run `SMOKE_LONG=1 node scripts/smoke-realtime.mjs`; it must report `final_length >= max_interim_length` |
 | Periodic hang or cut at the end | `bash scripts/diagnostics.sh`; check `client_closed_before_final`, `close_to_finish_ms`, `close_text_length` vs `final_text_length` |
 | Pass-through broken | `bash scripts/smoke-passthrough.sh`; check `network`/DNS and the system proxy setting |

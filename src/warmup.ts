@@ -1,8 +1,9 @@
 import https from "node:https";
-import type { IncomingHttpHeaders } from "node:http";
 import type { AppConfig } from "./config.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
+import { FILE_TIMEOUT_MS, type FileRetries } from "./retry.js";
+import { forwardRequest } from "./upstream.js";
 
 const KEEPALIVE_OPTIONS = {
   keepAlive: true,
@@ -24,107 +25,36 @@ export const sonioxApiAgent = new https.Agent(KEEPALIVE_OPTIONS);
 
 const originalFetch = globalThis.fetch;
 
-function headerBag(headers: IncomingHttpHeaders): Headers {
-  const out = new Headers();
-  for (const [key, value] of Object.entries(headers)) {
-    if (value === undefined) continue;
-    if (Array.isArray(value)) {
-      for (const item of value) out.append(key, item);
-    } else {
-      out.set(key, value);
-    }
-  }
-  return out;
-}
 
 /**
  * Fetch implementation for the Soniox REST client. Requests to the configured
  * API host go through a keep-alive agent, so the first upload and every poll
  * reuse the already-warm connection instead of paying a new TLS handshake.
  */
-export function createWarmFetch(baseUrl: string): typeof fetch {
-  let base: URL;
-  try {
-    base = new URL(baseUrl);
-  } catch {
-    return originalFetch;
-  }
-
+export function createWarmFetch(baseUrl: string, retry?: FileRetries): typeof fetch {
+  const base = new URL(baseUrl);
   return async function warmFetch(input, init) {
-    let request: Request;
-    try {
-      request = new Request(input, init);
-    } catch {
-      return originalFetch(input, init);
-    }
+    const request = new Request(input, init);
     const url = new URL(request.url);
-    if (url.protocol !== "https:" || url.hostname !== base.hostname) {
-      return originalFetch(input, init);
-    }
-
-    const body = request.body ? Buffer.from(await request.arrayBuffer()) : null;
-    const headers: Record<string, string | string[]> = {};
-    request.headers.forEach((value, key) => {
-      if (key !== "content-length" && key !== "host") headers[key] = value;
+    if (url.protocol !== "https:" || url.hostname !== base.hostname) return originalFetch(input, init);
+    const body = request.body ? Buffer.from(await request.arrayBuffer()) : Buffer.alloc(0);
+    const headers: Record<string, string> = Object.fromEntries(request.headers);
+    const response = await forwardRequest({
+      hostname: url.hostname,
+      port: Number(url.port) || 443,
+      method: request.method,
+      path: url.pathname + url.search,
+      headers,
+      body,
+      timeoutMs: FILE_TIMEOUT_MS,
+      agent: sonioxApiAgent,
+      retry,
     });
-    headers.host = url.host;
-    if (body) headers["content-length"] = String(body.length);
-
-    const { promise, resolve, reject } = Promise.withResolvers<Response>();
-    const req = https.request(
-      {
-        hostname: url.hostname,
-        port: url.port ? Number(url.port) : 443,
-        path: `${url.pathname}${url.search}`,
-        method: request.method,
-        headers,
-        agent: sonioxApiAgent,
-        servername: url.hostname,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer) => chunks.push(chunk));
-        res.on("end", () => {
-          const status = res.statusCode ?? 502;
-          // Response rejects a body for these statuses.
-          const bodyAllowed = status !== 204 && status !== 205 && status !== 304;
-          try {
-            resolve(
-              new Response(bodyAllowed ? Buffer.concat(chunks) : null, {
-                status,
-                statusText: res.statusMessage,
-                headers: headerBag(res.headers),
-              }),
-            );
-          } catch (err) {
-            reject(err instanceof Error ? err : new Error(String(err)));
-          }
-        });
-        res.on("error", reject);
-      },
-    );
-    req.on("error", reject);
-    if (request.signal) {
-      if (request.signal.aborted) {
-        req.destroy();
-        reject(request.signal.reason ?? new Error("request aborted"));
-        return promise;
-      }
-      request.signal.addEventListener(
-        "abort",
-        () => {
-          req.destroy(
-            request.signal?.reason instanceof Error
-              ? request.signal.reason
-              : new Error("request aborted"),
-          );
-        },
-        { once: true },
-      );
-    }
-    if (body && body.length > 0) req.write(body);
-    req.end();
-    return promise;
+    return new Response([204, 205, 304].includes(response.status) ? null : response.body, {
+      status: response.status,
+      statusText: response.statusMessage,
+      headers: response.headers as Record<string, string>,
+    });
   } as typeof fetch;
 }
 

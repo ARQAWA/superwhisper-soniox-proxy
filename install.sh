@@ -18,6 +18,7 @@ RUN_SMOKE=0
 REMOTE_INSTALL=0
 FORCE_UPGRADE=0
 CLEAN=0
+RESET_CONTEXT=0
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'install: %s\n' "$*" >&2; exit 1; }
@@ -30,6 +31,7 @@ Options:
   --no-launchd        Use nohup instead of a LaunchAgent (not persistent across reboots).
   --smoke             Run batch, pass-through, and realtime smoke tests after setup.
   --upgrade           Force an update of the installed checkout even when run from it.
+  --reset-context     Replace the recognition prompt with the current profile.
   --clean             Clean reinstall: remove the old checkout, reset the proxy
                       recognition context, then install fresh.
   -h, --help          Show this help.
@@ -48,6 +50,7 @@ for arg in "$@"; do
     --no-launchd) USE_LAUNCHD=0 ;;
     --smoke) RUN_SMOKE=1 ;;
     --upgrade) FORCE_UPGRADE=1 ;;
+    --reset-context) RESET_CONTEXT=1 ;;
     --clean) CLEAN=1 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $arg (try --help)" ;;
@@ -219,7 +222,7 @@ if [ -z "${SONIOX_API_KEY:-}" ] && [ ! -t 0 ]; then
   fi
 fi
 
-if [ "$CLEAN" = "1" ]; then
+if [ "$CLEAN" = "1" ] || [ "$RESET_CONTEXT" = "1" ]; then
   say "resetting the recognition context prompt"
   bash scripts/configure-soniox-context.sh --reset
 else

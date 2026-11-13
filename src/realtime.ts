@@ -4,16 +4,17 @@ import type { IncomingMessage } from "node:http";
 import { dirname } from "node:path";
 import type { Duplex } from "node:stream";
 import { WebSocket, WebSocketServer } from "ws";
+import { ConnectionError } from "@soniox/node";
 import type { RealtimeResult, RealtimeSttSession, RealtimeToken } from "@soniox/node";
 import type { AppConfig } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import { sonioxLanguagePolicy } from "./language.js";
 import type { Logger } from "./logger.js";
+import { CONNECT_TIMEOUT_MS, isRetryable, MAX_RETRIES, REALTIME_RETRY_TIMEOUT_MS } from "./retry.js";
 import { SonioxService } from "./soniox.js";
 import { scribeWebSocket } from "./scribe.js";
 import { mergeTokensToWords, tokensToText } from "./tokens.js";
-import type { ParsedFile } from "./types.js";
 import { redactQuery } from "./url-utils.js";
 
 interface WsDeps {
@@ -287,33 +288,23 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     sonioxModel: config.SONIOX_REALTIME_MODEL,
     closeDelayMs: config.WS_CLOSE_DELAY_MS,
   });
+
   let session: RealtimeSttSession | null = null;
   let sessionReady = false;
-  let sessionBaseMs = 0;
   let sessionProcessedMs = 0;
   let sessionGeneration = 0;
-  let sessionConnectStartedAt = Date.now();
-  let reconnectCount = 0;
-  let reconnecting = false;
-  let reconnectLimitHit = false;
-  let openingFinalSent = false;
-  let diagConnected = false;
-  let lagSince: number | null = null;
+  let finishRequested = false;
+  let retries = 0;
+  let retryDeadline: number | undefined;
+  let retryTimer: NodeJS.Timeout | undefined;
+  let connectTimer: NodeJS.Timeout | undefined;
+  let finalDeadline: number | undefined;
   let terminalStatus: string | null = null;
-
   const bytesPerMs = (actualSampleRate * actualChannels * 2) / 1000;
-  const audioChunks: Array<{ startMs: number; data: Buffer }> = [];
+  const bufferedAudio: Buffer[] = [];
   let audioBytes = 0;
-  let audioBufferComplete = true;
-  let audioBufferLimitLogged = false;
-  let recoveryUnavailable = false;
-  const MAX_AUDIO_BUFFER_BYTES = 64 * 1024 * 1024;
-
-  let prefixTokens: RealtimeToken[] = [];
-  let prefixMs = 0;
-  let prefixBatchPending = false;
-  let prefixBatchFailed = false;
-  let finalTokens: RealtimeToken[] = [];
+  const MAX_REPLAY_AUDIO_BYTES = 64 * 1024 * 1024;
+  const finalTokens: RealtimeToken[] = [];
   const finalTokenKeys = new Set<string>();
   let tailTokens: RealtimeToken[] = [];
   let closing = false;
@@ -321,61 +312,25 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   let completed = false;
   let closeTimer: NodeJS.Timeout | null = null;
   let closeDeadlineTimer: NodeJS.Timeout | undefined;
-  let lagTimer: NodeJS.Timeout | undefined;
   let keepaliveTimer: NodeJS.Timeout | undefined;
   let lastAudioAt = Date.now();
-  let recoveryTimer: NodeJS.Timeout | undefined;
-  let recoveryHoldTimer: NodeJS.Timeout | undefined;
-  let recoveryStarted = false;
-  let recoveryFinalReady = false;
   let closeStreamSeen = false;
   let lastTextLength = 0;
   let maxInterimLength = 0;
   let lastSendOk = false;
 
   const audioEndMs = (): number => audioBytes / bytesPerMs;
-  const processedMs = (): number => sessionBaseMs + sessionProcessedMs;
-  const allTokens = (): RealtimeToken[] => [...prefixTokens, ...finalTokens, ...tailTokens];
+  const processedMs = (): number => sessionProcessedMs;
+  const allTokens = (): RealtimeToken[] => [...finalTokens, ...tailTokens];
 
   const appendAudio = (buf: Buffer): void => {
-    if (audioBytes + buf.length <= MAX_AUDIO_BUFFER_BYTES) {
-      audioChunks.push({ startMs: audioBytes / bytesPerMs, data: Buffer.from(buf) });
-    } else {
-      audioBufferComplete = false;
-      recoveryUnavailable = true;
-      if (!audioBufferLimitLogged) {
-        audioBufferLimitLogged = true;
-        diag.anomaly(
-          "audio_buffer_limit",
-          { audio_ms: Math.round(audioBytes / bytesPerMs), limit_bytes: MAX_AUDIO_BUFFER_BYTES },
-          "warn",
-        );
-      }
+    if (audioBytes + buf.length > MAX_REPLAY_AUDIO_BYTES) {
+      errorClient("audio replay buffer limit");
+      return;
     }
     audioBytes += buf.length;
+    bufferedAudio.push(Buffer.from(buf));
   };
-
-  const audioSlice = (startMs: number, endMs: number = Number.POSITIVE_INFINITY): Buffer => {
-    const startByte = Math.max(0, Math.floor(startMs * bytesPerMs));
-    const endByte = Math.min(audioBytes, Math.floor(endMs * bytesPerMs));
-    if (endByte <= startByte) return Buffer.alloc(0);
-    const parts: Buffer[] = [];
-    let offset = 0;
-    for (const chunk of audioChunks) {
-      const chunkStart = offset;
-      const chunkEnd = offset + chunk.data.length;
-      const from = Math.max(startByte, chunkStart);
-      const to = Math.min(endByte, chunkEnd);
-      if (to > from) parts.push(chunk.data.subarray(from - chunkStart, to - chunkStart));
-      offset = chunkEnd;
-      if (offset >= endByte) break;
-    }
-    return Buffer.concat(parts);
-  };
-
-
-  const tokenKey = (token: RealtimeToken): string =>
-    `${token.start_ms ?? "?"}:${token.end_ms ?? "?"}:${token.text}`;
 
   const sendTokens = (tokens: RealtimeToken[], isFinal: boolean, speechFinal: boolean): number => {
     lastSendOk = false;
@@ -409,6 +364,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
         },
         "error",
       );
+      errorClient("client send failed");
       return 0;
     }
     if (textLength > 0) lastTextLength = textLength;
@@ -426,58 +382,27 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   };
 
   const sendInterim = (): number => {
-    if (closing) return 0;
+    if (closing || completed || clientClosing) return 0;
     const textLength = sendTokens(allTokens(), false, false);
     if (textLength > maxInterimLength) maxInterimLength = textLength;
     diag.interimSent(textLength);
     return textLength;
   };
 
-  const sendEmptyInterim = (): void => {
-    if (completed || clientClosing || client.readyState !== WebSocket.OPEN) return;
-    try {
-      client.send(
-        buildResultsPayload({
-          tokens: [],
-          start: 0,
-          duration: 0,
-          isFinal: false,
-          speechFinal: false,
-          requestId,
-          model: config.TARGET_MODEL,
-          channels,
-        }),
-      );
-    } catch {
-      // best effort while holding the app open for batch recovery
-    }
-  };
-
-  // Soniox slides its token window: once a prefix is finalized, later results
-  // contain only newer tokens. Accumulate the finalized prefix or the app loses
-  // everything before the last pause.
+  // Soniox drops finalized prefixes from later results; retain them once.
   const absorbResult = (tokens: RealtimeToken[]): number => {
     const before = finalTokens.length;
-    const adjust = (token: RealtimeToken): RealtimeToken =>
-      sessionBaseMs === 0
-        ? token
-        : {
-            ...token,
-            start_ms:
-              typeof token.start_ms === "number" ? token.start_ms + sessionBaseMs : token.start_ms,
-            end_ms: typeof token.end_ms === "number" ? token.end_ms + sessionBaseMs : token.end_ms,
-          };
     let index = 0;
     while (index < tokens.length && tokens[index].is_final) {
-      const token = adjust(tokens[index]);
-      const key = tokenKey(token);
+      const token = tokens[index];
+      const key = `${token.start_ms ?? "?"}:${token.end_ms ?? "?"}:${token.text}`;
       if (!finalTokenKeys.has(key)) {
         finalTokenKeys.add(key);
         finalTokens.push(token);
       }
       index += 1;
     }
-    tailTokens = tokens.slice(index).map(adjust);
+    tailTokens = tokens.slice(index);
     return finalTokens.length - before;
   };
 
@@ -507,48 +432,31 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
 
   const completeStream = (): void => {
     if (completed) return;
-    if (recoveryStarted && !recoveryFinalReady) {
-      diag.event("final_ignored_during_recovery", {
-        final_tokens: prefixTokens.length + finalTokens.length,
-        tail_tokens: tailTokens.length,
-      });
+    if (!closing) {
+      errorClient("unexpected realtime finish");
       return;
     }
-    if (!audioBufferComplete) {
-      diag.anomaly(
-        "final_suppressed_incomplete_buffer",
-        {
-          audio_ms: Math.round(audioEndMs()),
-          processed_ms: Math.round(processedMs()),
-        },
-        "error",
-      );
-      errorClient("audio buffer incomplete");
+    if (finalDeadline !== undefined && Date.now() >= finalDeadline) {
+      errorClient("final timeout");
       return;
     }
-    if (prefixBatchPending || prefixBatchFailed) {
-      diag.prefixMissingAtFinal();
-      if (closing) {
-        startBatchRecovery(
-          prefixBatchFailed ? "prefix batch failed at final" : "prefix batch missing at final",
-        );
-      } else {
-        diag.event("final_deferred_prefix_pending", {
-          prefix_pending: prefixBatchPending,
-          prefix_failed: prefixBatchFailed,
-        });
-      }
+    if (retryDeadline !== undefined && Date.now() >= retryDeadline) {
+      errorClient("retry timeout");
+      return;
+    }
+    if (processedMs() < Math.floor(audioEndMs())) {
+      handleSessionFailure(new ConnectionError("Incomplete realtime response"), sessionGeneration);
       return;
     }
     completed = true;
     clearTimeout(closeDeadlineTimer);
-    clearTimeout(recoveryTimer);
+    clearTimeout(retryTimer);
+    clearTimeout(connectTimer);
+    bufferedAudio.length = 0;
     if (keepaliveTimer) {
       clearInterval(keepaliveTimer);
       keepaliveTimer = undefined;
     }
-    if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
-    if (lagTimer) clearInterval(lagTimer);
     const tokens = allTokens();
     const clientOpen = client.readyState === WebSocket.OPEN;
     let finalTextLength = 0;
@@ -576,10 +484,14 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
         delivered = false;
       }
     }
+    if (!delivered) {
+      errorClient("final send failed");
+      return;
+    }
     logger.info(
       {
         request_id: requestId,
-        final_tokens: prefixTokens.length + finalTokens.length,
+        final_tokens: finalTokens.length,
         tail_tokens: tailTokens.length,
         final_text_length: finalTextLength,
         max_interim_length: maxInterimLength,
@@ -601,76 +513,19 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     closeClient();
   };
 
-  const startPrefixBatch = (prefixBuffer: Buffer, connectMs: number): void => {
-    const pendingMs = Math.round(prefixBuffer.length / bytesPerMs);
-    prefixMs = pendingMs;
-    sessionBaseMs = pendingMs;
-    prefixBatchPending = true;
-    prefixBatchFailed = false;
-    diag.prefixBatchStarted({ connectMs, prefixMs: pendingMs, bytes: prefixBuffer.length });
-    const prefixFile: ParsedFile = {
-      field: "audio",
-      filename: `prefix-${requestId}.pcm`,
-      mimeType: "audio/pcm",
-      size: prefixBuffer.length,
-      data: prefixBuffer,
-    };
-    const prefixFields = {
-      encoding: "linear16",
-      sample_rate: String(actualSampleRate),
-      channels: String(actualChannels),
-      language,
-    };
-    const prefixStarted = Date.now();
-    void soniox
-      .transcribe(prefixFile, prefixFields, requestId, false, "realtime_prefix")
-      .then((result) => {
-        prefixTokens = result.tokens.map((token) => ({
-          text: token.text,
-          start_ms: token.start_ms,
-          end_ms: token.end_ms,
-          confidence: token.confidence,
-          is_final: true,
-          ...(token.speaker ? { speaker: token.speaker } : {}),
-          ...(token.language ? { language: token.language } : {}),
-        }));
-        prefixBatchPending = false;
-        diag.prefixBatchReady({
-          tokens: prefixTokens.length,
-          textLength: result.text.length,
-          latencyMs: Date.now() - prefixStarted,
-        });
-        if (completed) {
-          diag.anomaly("prefix_arrived_after_final", {
-            prefix_ms: prefixMs,
-            prefix_tokens: prefixTokens.length,
-          });
-        } else {
-          sendInterim();
-        }
-      })
-      .catch((err: Error) => {
-        prefixBatchPending = false;
-        prefixBatchFailed = true;
-        diag.prefixBatchFailed(errorLabel(err));
-        logger.warn({ request_id: requestId, error: errorLabel(err) }, "prefix batch failed");
-        if (!completed) sendInterim();
-      });
-  };
-
-  const errorClient = (reason: string, options: { clearInterim?: boolean } = {}): void => {
+  const errorClient = (reason: string): void => {
     if (clientClosing) return;
     clientClosing = true;
     completed = true;
     terminalStatus = "error";
+    bufferedAudio.length = 0;
     clearTimeout(closeDeadlineTimer);
-    clearTimeout(recoveryTimer);
+    clearTimeout(retryTimer);
+    clearTimeout(connectTimer);
     if (keepaliveTimer) {
       clearInterval(keepaliveTimer);
       keepaliveTimer = undefined;
     }
-    if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
-    if (lagTimer) clearInterval(lagTimer);
     if (closeTimer) {
       clearTimeout(closeTimer);
       closeTimer = null;
@@ -682,7 +537,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
         audio_ms: Math.round(audioEndMs()),
         processed_ms: Math.round(processedMs()),
         close_stream: closeStreamSeen,
-        final_tokens: prefixTokens.length + finalTokens.length,
+        final_tokens: finalTokens.length,
         tail_tokens: tailTokens.length,
       },
       "error",
@@ -699,293 +554,106 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     if (client.readyState === WebSocket.OPEN) {
       // The app may keep the last interim in its live text. Clear it before the
       // error close so a failure cannot leave a truncated preview behind.
-      if (options.clearInterim !== false) {
-        try {
-          client.send(
-            buildResultsPayload({
-              tokens: [],
-              start: 0,
-              duration: 0,
-              isFinal: false,
-              speechFinal: false,
-              requestId,
-              model: config.TARGET_MODEL,
-              channels,
-            }),
-          );
-        } catch {
-          // best effort
-        }
+      try {
+        client.send(
+          buildResultsPayload({
+            tokens: [],
+            start: 0,
+            duration: 0,
+            isFinal: false,
+            speechFinal: false,
+            requestId,
+            model: config.TARGET_MODEL,
+            channels,
+          }),
+        );
+      } catch {
+        // best effort
       }
       client.close(1011, "soniox incomplete");
     }
+    cancelSession();
   };
 
-  const finishWithBatch = (tokens: RealtimeToken[]): void => {
-    if (completed || clientClosing) return;
-    recoveryFinalReady = true;
-    prefixTokens = [];
-    finalTokens = tokens;
-    tailTokens = [];
-    prefixBatchPending = false;
-    prefixBatchFailed = false;
-    sessionBaseMs = 0;
-    sessionProcessedMs = Math.round(audioEndMs());
-    completeStream();
-  };
-
-  const startBatchRecovery = (reason: string): void => {
-    if (recoveryStarted || completed || clientClosing) return;
-    if (!audioBufferComplete) {
-      diag.anomaly(
-        "batch_recovery_unavailable",
-        {
-          reason,
-          audio_ms: Math.round(audioEndMs()),
-          processed_ms: Math.round(processedMs()),
-        },
-        "error",
-      );
-      errorClient("audio buffer incomplete");
-      return;
-    }
-    recoveryStarted = true;
-    diag.anomaly(
-      "batch_recovery_started",
-      {
-        reason,
-        audio_ms: Math.round(audioEndMs()),
-        processed_ms: Math.round(processedMs()),
-        close_stream: closeStreamSeen,
-      },
-      "warn",
-    );
-    logger.warn(
-      {
-        request_id: requestId,
-        reason,
-        audio_ms: Math.round(audioEndMs()),
-        processed_ms: Math.round(processedMs()),
-      },
-      "soniox batch recovery started",
-    );
-    // Keep the app waiting while the full recording is transcribed. Empty
-    // interims reset its idle timer without exposing a truncated transcript.
-    sendEmptyInterim();
-    recoveryHoldTimer = setInterval(sendEmptyInterim, 500);
-    recoveryHoldTimer.unref?.();
-    recoveryTimer = setTimeout(() => {
-      if (!completed) errorClient("batch recovery timeout");
-    }, config.SONIOX_CLOSE_RECOVERY_MS);
-    recoveryTimer.unref?.();
-
-    const audio = audioSlice(0, audioEndMs());
-    if (audio.length === 0) {
-      errorClient("no audio for batch recovery");
-      return;
-    }
-    const file: ParsedFile = {
-      field: "audio",
-      filename: `recovery-${requestId}.pcm`,
-      mimeType: "audio/pcm",
-      size: audio.length,
-      data: audio,
-    };
-    const fields = {
-      encoding: "linear16",
-      sample_rate: String(actualSampleRate),
-      channels: String(actualChannels),
-      language,
-    };
-    const started = Date.now();
-    void soniox
-      .transcribe(file, fields, requestId, false, "realtime_recovery")
-      .then((result) => {
-        if (completed || clientClosing) return;
-        const tokens: RealtimeToken[] = result.tokens.map((token) => ({
-          text: token.text,
-          start_ms: token.start_ms,
-          end_ms: token.end_ms,
-          confidence: token.confidence,
-          is_final: true,
-          ...(token.speaker ? { speaker: token.speaker } : {}),
-          ...(token.language ? { language: token.language } : {}),
-        }));
-        diag.event("batch_recovery_ready", {
-          latency_ms: Date.now() - started,
-          tokens: tokens.length,
-          text_length: result.text.length,
-          audio_ms: Math.round(audioEndMs()),
-        });
-        finishWithBatch(tokens);
-      })
-      .catch((err: Error) => {
-        diag.anomaly("batch_recovery_failed", { error: errorLabel(err) }, "error");
-        logger.error({ request_id: requestId, error: errorLabel(err) }, "soniox batch recovery failed");
-        if (!completed && !clientClosing) errorClient("batch recovery failed");
-      });
-  };
-
-  const reconnect = (reason: string): void => {
-    if (reconnecting || clientClosing || completed || closing) return;
-    if (!audioBufferComplete) {
-      recoveryUnavailable = true;
-      diag.anomaly(
-        "reconnect_skipped_incomplete_buffer",
-        {
-          reason,
-          audio_ms: Math.round(audioEndMs()),
-          processed_ms: Math.round(processedMs()),
-        },
-        "warn",
-      );
-      return;
-    }
-    if (reconnectCount >= config.SONIOX_RECONNECT_MAX) {
-      diag.anomaly(
-        "reconnect_limit",
-        {
-          attempt: reconnectCount,
-          reason,
-          audio_ms: Math.round(audioEndMs()),
-          processed_ms: Math.round(processedMs()),
-        },
-        "warn",
-      );
-      reconnecting = false;
-      reconnectLimitHit = true;
-      return;
-    }
-    reconnecting = true;
-    reconnectCount += 1;
-
-    let lastFinalEndMs = prefixMs;
-    let hasUnknownFinalEnd = false;
-    for (const token of finalTokens) {
-      if (typeof token.end_ms !== "number") {
-        hasUnknownFinalEnd = true;
-        break;
-      }
-      lastFinalEndMs = Math.max(lastFinalEndMs, token.end_ms);
-    }
-    let resumeMs = hasUnknownFinalEnd
-      ? prefixMs
-      : Math.max(prefixMs, lastFinalEndMs - config.SONIOX_RECONNECT_OVERLAP_MS);
-    if (!hasUnknownFinalEnd) {
-      for (let pass = 0; pass <= finalTokens.length; pass += 1) {
-        const hasUnknownCrossingStart = finalTokens.some(
-          (token) =>
-            typeof token.end_ms === "number" &&
-            typeof token.start_ms !== "number" &&
-            token.end_ms > resumeMs,
-        );
-        if (hasUnknownCrossingStart) {
-          resumeMs = prefixMs;
-          break;
-        }
-        const crossingStarts = finalTokens
-          .filter(
-            (token) =>
-              typeof token.start_ms === "number" &&
-              typeof token.end_ms === "number" &&
-              token.start_ms < resumeMs &&
-              token.end_ms > resumeMs,
-          )
-          .map((token) => token.start_ms as number);
-        if (crossingStarts.length === 0) break;
-        const nextResumeMs = Math.max(prefixMs, Math.min(...crossingStarts));
-        if (nextResumeMs >= resumeMs) break;
-        resumeMs = nextResumeMs;
-      }
-    }
-    resumeMs = Math.min(audioEndMs(), resumeMs);
-
-    diag.anomaly(
-      "reconnect",
-      {
-        reason,
-        attempt: reconnectCount,
-        resume_ms: Math.round(resumeMs),
-        last_final_ms: Math.round(lastFinalEndMs),
-        processed_ms: Math.round(processedMs()),
-        audio_ms: Math.round(audioEndMs()),
-      },
-      "warn",
-    );
-    logger.warn(
-      {
-        request_id: requestId,
-        reason,
-        attempt: reconnectCount,
-        resume_ms: Math.round(resumeMs),
-        last_final_ms: Math.round(lastFinalEndMs),
-        processed_ms: Math.round(processedMs()),
-        audio_ms: Math.round(audioEndMs()),
-      },
-      "soniox realtime reconnect",
-    );
-    finalTokens = finalTokens.filter(
-      (token) => typeof token.end_ms === "number" && token.end_ms <= resumeMs,
-    );
-    finalTokenKeys.clear();
-    for (const token of finalTokens) finalTokenKeys.add(tokenKey(token));
-    tailTokens = [];
-    const old = session;
+  function cancelSession(): void {
+    const previous = session;
+    sessionGeneration += 1;
     session = null;
     sessionReady = false;
+    clearTimeout(connectTimer);
     try {
-      old?.close();
+      previous?.close();
     } catch {
-      // already closed
+      // The session may already be closed.
     }
-    lagSince = null;
-    openSession(resumeMs, !diagConnected);
-  };
+  }
 
-  const handleSessionFailure = (error: unknown, generation: number): void => {
-    if (generation !== sessionGeneration) return;
+  function handleSessionFailure(error: unknown, generation: number): void {
+    if (completed || clientClosing || generation !== sessionGeneration) return;
     const label = errorLabel(error);
-    diag.anomaly(
-      "soniox_session_error",
-      { error: label, reconnect_count: reconnectCount },
-      "warn",
-    );
     logger.error({ request_id: requestId, error: label }, "soniox realtime error");
-    if (clientClosing || completed || closing) return;
-    if (reconnectCount < config.SONIOX_RECONNECT_MAX) {
-      reconnect("session_error");
+    const now = Date.now();
+    if (finalDeadline !== undefined && now >= finalDeadline) {
+      errorClient("final timeout");
       return;
     }
-    // Keep accepting and buffering app audio. At CloseStream this path becomes
-    // a full batch recovery instead of losing the rest of the dictation.
-    diag.anomaly(
-      "reconnect_exhausted",
-      {
-        error: label,
-        reconnect_count: reconnectCount,
-        audio_ms: Math.round(audioEndMs()),
-        processed_ms: Math.round(processedMs()),
-      },
-      "warn",
-    );
-    sessionReady = false;
-    reconnectLimitHit = true;
-  };
+    if (!isRetryable(error) || retries >= MAX_RETRIES || (retryDeadline !== undefined && now >= retryDeadline)) {
+      diag.error(label, true);
+      errorClient("session failed");
+      return;
+    }
+    if (retryDeadline === undefined) {
+      retryDeadline = now + REALTIME_RETRY_TIMEOUT_MS;
+      retryTimer = setTimeout(() => errorClient("retry timeout"), REALTIME_RETRY_TIMEOUT_MS);
+      retryTimer.unref?.();
+    }
+    retries += 1;
+    cancelSession();
+    sessionProcessedMs = 0;
+    finalTokens.length = 0;
+    finalTokenKeys.clear();
+    tailTokens = [];
+    // Leave the current SDK callback before replacing its canceled session.
+    queueMicrotask(openSession);
+  }
 
-  function attachSession(target: RealtimeSttSession, generation: number, first: boolean): void {
+  function finishSession(target: RealtimeSttSession, generation: number): void {
+    if (!closing || !sessionReady || finishRequested || completed || clientClosing || generation !== sessionGeneration) return;
+    if (finalDeadline !== undefined && Date.now() >= finalDeadline) {
+      errorClient("final timeout");
+      return;
+    }
+    finishRequested = true;
+    diag.finishRequested();
+    void target.finish().catch((err: unknown) => {
+      if (completed || clientClosing || generation !== sessionGeneration) return;
+      diag.finishFailed(errorLabel(err));
+      logger.warn({ request_id: requestId, error: errorLabel(err) }, "soniox finish failed");
+      handleSessionFailure(err, generation);
+    });
+  }
+
+  function attachSession(target: RealtimeSttSession, generation: number, connectStartedAt: number): void {
+    const active = (): boolean =>
+      !completed && !clientClosing && generation === sessionGeneration && target === session;
     target.on("connected", () => {
-      if (generation !== sessionGeneration) return;
-      reconnecting = false;
-      reconnectLimitHit = false;
-      lagSince = null;
-      const connectMs = Date.now() - sessionConnectStartedAt;
-      const currentAudioMs = audioEndMs();
+      if (!active()) return;
+      clearTimeout(connectTimer);
+      if (
+        (retryDeadline !== undefined && Date.now() >= retryDeadline) ||
+        (finalDeadline !== undefined && Date.now() >= finalDeadline)
+      ) {
+        errorClient("realtime deadline exceeded");
+        return;
+      }
+      const connectMs = Date.now() - connectStartedAt;
       diag.event("session_connected", {
-        first,
+        first: retries === 0,
         connect_ms: connectMs,
-        audio_ms: Math.round(currentAudioMs),
-        base_ms: Math.round(sessionBaseMs),
+        audio_ms: Math.round(audioEndMs()),
+        base_ms: 0,
       });
+      diag.connected(connectMs);
       logger.info(
         {
           request_id: requestId,
@@ -995,81 +663,40 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
           channels,
           language,
           connect_ms: connectMs,
-          reconnect: !first,
+          reconnect: retries > 0,
         },
         "soniox realtime connected",
       );
-      if (!audioBufferComplete) {
-        diag.anomaly(
-          "connect_with_incomplete_buffer",
-          {
-            audio_ms: Math.round(audioEndMs()),
-            limit_bytes: MAX_AUDIO_BUFFER_BYTES,
-          },
-          "error",
-        );
-        errorClient("audio buffer incomplete", { clearInterim: maxInterimLength > 0 });
-        return;
-      }
-      if (recoveryStarted) {
-        diag.event("connected_during_recovery", {
-          first,
-          connect_ms: connectMs,
-          audio_ms: Math.round(currentAudioMs),
-        });
-        return;
-      }
-      if (!diagConnected) {
-        diag.connected(connectMs);
-        diagConnected = true;
-      }
-      if (!openingFinalSent && client.readyState === WebSocket.OPEN) {
-        // Match Deepgram's opening empty final segment.
-        client.send(
-          buildResultsPayload({
-            tokens: [],
-            start: 0,
-            duration: 0,
-            isFinal: true,
-            speechFinal: true,
-            requestId,
-            model: config.TARGET_MODEL,
-            channels,
-          }),
-        );
-        openingFinalSent = true;
-      }
-      if (first) {
-        const pendingBuffer = audioSlice(0, currentAudioMs);
-        const pendingMs = Math.round(pendingBuffer.length / bytesPerMs);
-        if (
-          config.SONIOX_PREFIX_BATCH_CONNECT_MS > 0 &&
-          connectMs >= config.SONIOX_PREFIX_BATCH_CONNECT_MS &&
-          pendingMs >= 300 &&
-          pendingBuffer.length > 0
-        ) {
-          // A slow Soniox handshake leaves seconds of queued audio. Sending that
-          // burst to realtime puts the server permanently behind live audio, and
-          // the app closes before the tail is finalized. Recover the queued prefix
-          // with async transcription, keep realtime on the live edge.
-          sessionReady = true;
-          startPrefixBatch(pendingBuffer, connectMs);
+      try {
+        if (retries === 0 && client.readyState === WebSocket.OPEN) {
+          client.send(buildResultsPayload({
+            tokens: [], start: 0, duration: 0, isFinal: true, speechFinal: true,
+            requestId, model: config.TARGET_MODEL, channels,
+          }));
+        }
+        for (const chunk of bufferedAudio) {
+          target.sendAudio(new Uint8Array(chunk));
+          if (!active()) return;
+        }
+        if (retryDeadline !== undefined && Date.now() >= retryDeadline) {
+          errorClient("retry timeout");
           return;
         }
-        sessionBaseMs = 0;
-        sessionProcessedMs = 0;
-        if (pendingBuffer.length > 0) target.sendAudio(new Uint8Array(pendingBuffer));
         sessionReady = true;
-        return;
+        if (closing) {
+          finishSession(target, generation);
+        } else {
+          clearTimeout(retryTimer);
+          retryDeadline = undefined;
+        }
+      } catch (err) {
+        handleSessionFailure(err, generation);
       }
-      const backlog = audioSlice(sessionBaseMs, currentAudioMs);
-      if (backlog.length > 0) target.sendAudio(new Uint8Array(backlog));
-      sessionReady = true;
     });
 
     target.on("result", (result: RealtimeResult) => {
-      if (generation !== sessionGeneration) return;
-      sessionProcessedMs = result.total_audio_proc_ms;
+      if (!active()) return;
+      sessionProcessedMs = Math.max(sessionProcessedMs, result.total_audio_proc_ms);
       if (result.tokens.length > 0) {
         const newFinalTokens = absorbResult(result.tokens);
         sendInterim();
@@ -1081,13 +708,13 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
           .filter((value): value is number => typeof value === "number");
         diag.result({
           tokens: result.tokens.length,
-          finalTokens: prefixTokens.length + finalTokens.length,
+          finalTokens: finalTokens.length,
           tailTokens: tailTokens.length,
           newFinalTokens,
           totalAudioProcMs: processedMs(),
-          finalAudioProcMs: sessionBaseMs + result.final_audio_proc_ms,
-          windowStartMs: starts.length ? Math.min(...starts) + sessionBaseMs : null,
-          windowEndMs: ends.length ? Math.max(...ends) + sessionBaseMs : null,
+          finalAudioProcMs: result.final_audio_proc_ms,
+          windowStartMs: starts.length ? Math.min(...starts) : null,
+          windowEndMs: ends.length ? Math.max(...ends) : null,
           finished: result.finished === true,
           textLength: lastTextLength,
         });
@@ -1095,7 +722,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     });
 
     target.on("endpoint", () => {
-      if (generation !== sessionGeneration) return;
+      if (!active()) return;
       diag.endpoint();
       logger.debug(
         { request_id: requestId, final_tokens: finalTokens.length, tail_tokens: tailTokens.length },
@@ -1105,7 +732,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     });
 
     target.on("finalized", () => {
-      if (generation !== sessionGeneration) return;
+      if (!active()) return;
       diag.finalized(finalTokens.length, tailTokens.length);
       logger.debug(
         { request_id: requestId, final_tokens: finalTokens.length, tail_tokens: tailTokens.length },
@@ -1115,16 +742,16 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     });
 
     target.on("finished", () => {
-      if (generation !== sessionGeneration) return;
+      if (!active()) return;
       diag.finished({
-        finalTokens: prefixTokens.length + finalTokens.length,
+        finalTokens: finalTokens.length,
         tailTokens: tailTokens.length,
         totalAudioProcMs: processedMs(),
       });
       logger.info(
         {
           request_id: requestId,
-          final_tokens: prefixTokens.length + finalTokens.length,
+          final_tokens: finalTokens.length,
           tail_tokens: tailTokens.length,
           total_ms: processedMs(),
         },
@@ -1136,47 +763,68 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     target.on("error", (err: Error) => {
       handleSessionFailure(err, generation);
     });
+    target.on("disconnected", (reason?: string) => {
+      // The SDK normally emits a richer error immediately after disconnected.
+      queueMicrotask(() => {
+        if (active()) {
+          handleSessionFailure(new ConnectionError(reason || "WebSocket disconnected"), generation);
+        }
+      });
+    });
   }
 
-  function openSession(baseMs: number, first: boolean): void {
-    sessionGeneration += 1;
-    const generation = sessionGeneration;
-    sessionBaseMs = baseMs;
-    sessionProcessedMs = 0;
-    sessionReady = false;
-    reconnecting = false;
-    sessionConnectStartedAt = Date.now();
-    const target = soniox.createRealtimeSession({
-      languageHints,
-      identifyLanguage,
-      sampleRate: actualSampleRate,
-      channels: actualChannels,
-      diarize,
-      endpointDetection,
-      endpointSensitivity: config.SONIOX_ENDPOINT_SENSITIVITY,
-      endpointLatencyAdjustmentLevel: config.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
-      maxEndpointDelayMs: config.SONIOX_MAX_ENDPOINT_DELAY_MS,
-      clientReferenceId: `sw-rt-${requestId}`,
-    });
-    session = target;
-    attachSession(target, generation, first);
-    void target.connect().catch((err: Error) => {
-      if (generation !== sessionGeneration) return;
+  function openSession(): void {
+    if (completed || clientClosing) return;
+    const now = Date.now();
+    const connectTimeoutMs = Math.min(
+      CONNECT_TIMEOUT_MS,
+      (retryDeadline ?? Infinity) - now,
+      (finalDeadline ?? Infinity) - now,
+    );
+    if (connectTimeoutMs <= 0) {
+      errorClient("realtime deadline exceeded");
+      return;
+    }
+    const generation = ++sessionGeneration;
+    finishRequested = false;
+    try {
+      const target = soniox.createRealtimeSession({
+        languageHints,
+        identifyLanguage,
+        sampleRate: actualSampleRate,
+        channels: actualChannels,
+        diarize,
+        endpointDetection,
+        endpointSensitivity: config.SONIOX_ENDPOINT_SENSITIVITY,
+        endpointLatencyAdjustmentLevel: config.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL,
+        maxEndpointDelayMs: config.SONIOX_MAX_ENDPOINT_DELAY_MS,
+        clientReferenceId: `sw-rt-${requestId}`,
+        connectTimeoutMs,
+      });
+      session = target;
+      attachSession(target, generation, now);
+      connectTimer = setTimeout(() => {
+        handleSessionFailure(new ConnectionError("Connection timed out"), generation);
+      }, connectTimeoutMs);
+      connectTimer.unref?.();
+      void target.connect().then(() => {
+        if (completed || clientClosing || generation !== sessionGeneration) target.close();
+      }).catch((err: unknown) => {
+        handleSessionFailure(err, generation);
+      });
+    } catch (err) {
       handleSessionFailure(err, generation);
-    });
+    }
   }
 
-  openSession(0, true);
+  openSession();
 
-  if (config.SONIOX_KEEPALIVE_MS > 0) {
+  if (!completed && config.SONIOX_KEEPALIVE_MS > 0) {
     const checkMs = Math.min(config.SONIOX_KEEPALIVE_MS, 1000);
     keepaliveTimer = setInterval(() => {
       if (
         !sessionReady ||
         !session ||
-        reconnecting ||
-        reconnectLimitHit ||
-        recoveryStarted ||
         closing ||
         completed ||
         clientClosing
@@ -1185,6 +833,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
       }
       const idleMs = Date.now() - lastAudioAt;
       if (idleMs < config.SONIOX_KEEPALIVE_MS) return;
+      const generation = sessionGeneration;
       try {
         session.keepAlive();
         lastAudioAt = Date.now();
@@ -1192,40 +841,30 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
         logger.debug({ request_id: requestId, idle_ms: idleMs }, "soniox realtime keepalive");
       } catch (err) {
         diag.event("keepalive_failed", { error: errorLabel(err) });
+        handleSessionFailure(err, generation);
       }
     }, checkMs);
     keepaliveTimer.unref?.();
   }
 
-  lagTimer = setInterval(() => {
-    if (!sessionReady || reconnecting || reconnectLimitHit || recoveryUnavailable || closing || completed || clientClosing) return;
-    const lag = audioEndMs() - processedMs();
-    if (lag > config.SONIOX_RECONNECT_LAG_MS) {
-      if (lagSince === null) lagSince = Date.now();
-      else if (Date.now() - lagSince >= 1500) {
-        lagSince = null;
-        reconnect("lag");
-      }
-    } else {
-      lagSince = null;
-    }
-  }, 1000);
-  lagTimer.unref?.();
-
   client.on("message", (data, isBinary) => {
+    if (completed || clientClosing || closing) return;
     logClientFrame(logger, requestId, data, isBinary, model);
     if (isBinary) {
       lastAudioAt = Date.now();
       diag.audioFrame(rawByteLength(data));
       const buf = toBuffer(data);
       appendAudio(buf);
+      if (completed) return;
       if (sessionReady && session) {
+        const generation = sessionGeneration;
         try {
           session.sendAudio(new Uint8Array(buf));
         } catch (err) {
           diag.event("send_audio_failed", {
             error: errorLabel(err),
           });
+          handleSessionFailure(err, generation);
         }
       }
       return;
@@ -1235,93 +874,59 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
     if (/^closestream$/i.test(type)) {
       closeStreamSeen = true;
       closing = true;
+      finalDeadline = Date.now() + config.SONIOX_CLOSE_TIMEOUT_MS;
+      closeDeadlineTimer = setTimeout(() => {
+        if (!completed) {
+          diag.anomaly(
+            "finalize_wait_exceeded",
+            {
+              wait_ms: config.SONIOX_CLOSE_TIMEOUT_MS,
+              final_tokens: finalTokens.length,
+              tail_tokens: tailTokens.length,
+            },
+            "warn",
+          );
+          errorClient("final timeout");
+        }
+      }, config.SONIOX_CLOSE_TIMEOUT_MS);
+      closeDeadlineTimer.unref?.();
       const closeTextLength = tokensToText(allTokens()).length;
       const lag = Math.round(audioEndMs() - processedMs());
       diag.closeStream({
-        finalTokens: prefixTokens.length + finalTokens.length,
+        finalTokens: finalTokens.length,
         tailTokens: tailTokens.length,
         textLength: closeTextLength,
       });
       logger.info(
         {
           request_id: requestId,
-          final_tokens: prefixTokens.length + finalTokens.length,
+          final_tokens: finalTokens.length,
           tail_tokens: tailTokens.length,
           close_text_length: closeTextLength,
           lag_ms: lag,
           session_ready: sessionReady,
-          reconnecting,
         },
         "soniox realtime CloseStream",
       );
-      diag.finishRequested();
-      if (prefixBatchPending || prefixBatchFailed) {
-        diag.anomaly(
-          "close_stream_prefix_incomplete",
-          {
-            prefix_pending: prefixBatchPending,
-            prefix_failed: prefixBatchFailed,
-            close_text_length: closeTextLength,
-          },
-          "warn",
-        );
-        startBatchRecovery("prefix incomplete at close");
-        return;
-      }
-      if (!session || !sessionReady || reconnecting || lag > config.SONIOX_CLOSE_ERROR_LAG_MS) {
-        diag.anomaly(
-          "close_stream_incomplete",
-          {
-            lag_ms: lag,
-            session_ready: sessionReady,
-            reconnecting,
-            close_text_length: closeTextLength,
-          },
-          "warn",
-        );
-        startBatchRecovery("lag at close");
-        return;
-      }
-      void session.finish().catch((err: Error) => {
-        diag.finishFailed(errorLabel(err));
-        if (!clientClosing) {
-          logger.warn({ request_id: requestId, error: errorLabel(err) }, "soniox finish failed");
-          startBatchRecovery("finish failed");
-        }
-      });
-      // Do not wait past the app's patience for a partial final. Start a full
-      // batch recovery and hold the socket open with empty interims instead.
-      closeDeadlineTimer = setTimeout(() => {
-        if (!completed) {
-          diag.anomaly(
-            "finalize_wait_exceeded",
-            {
-              wait_ms: config.SONIOX_CLOSE_BATCH_DELAY_MS,
-              close_text_length: closeTextLength,
-              final_tokens: finalTokens.length,
-              tail_tokens: tailTokens.length,
-            },
-            "warn",
-          );
-          startBatchRecovery("final timeout");
-        }
-      }, config.SONIOX_CLOSE_BATCH_DELAY_MS);
-      closeDeadlineTimer.unref?.();
+      if (session && sessionReady) finishSession(session, sessionGeneration);
     } else if (/^finalize$/i.test(type)) {
       diag.clientControl("Finalize");
+      const generation = sessionGeneration;
       try {
         session?.finalize();
       } catch (err) {
         diag.event("finalize_failed", {
           error: errorLabel(err),
         });
+        handleSessionFailure(err, generation);
       }
     } else if (/^keepalive$/i.test(type)) {
       diag.clientControl("KeepAlive");
+      const generation = sessionGeneration;
       try {
         session?.keepAlive();
-      } catch {
-        // session may be reconnecting
+      } catch (err) {
+        handleSessionFailure(err, generation);
       }
     } else {
       diag.clientControl(controlType(type) ?? "unknown");
@@ -1330,19 +935,7 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
 
   client.on("close", (code, reason) => {
     clientClosing = true;
-    if (recoveryStarted && !recoveryFinalReady) {
-      diag.anomaly(
-        "client_closed_during_recovery",
-        {
-          code,
-          audio_ms: Math.round(audioEndMs()),
-          processed_ms: Math.round(processedMs()),
-          reason_length: Buffer.byteLength(reason),
-        },
-        "error",
-      );
-      terminalStatus ??= "error";
-    }
+    bufferedAudio.length = 0;
     const lostTextLength =
       terminalStatus === "error" && !lastSendOk
         ? tokensToText(allTokens()).length
@@ -1353,32 +946,28 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
       code,
       reasonLength: Buffer.byteLength(reason),
       lostTextLength,
-      finalTokens: prefixTokens.length + finalTokens.length,
+      finalTokens: finalTokens.length,
       tailTokens: tailTokens.length,
     });
     diag.end(terminalStatus ?? undefined);
     logger.info({ request_id: requestId, code, reason_bytes: reason.length }, "ws soniox client closed");
     clearTimeout(closeDeadlineTimer);
-    clearTimeout(recoveryTimer);
+    clearTimeout(retryTimer);
+    clearTimeout(connectTimer);
     if (keepaliveTimer) {
       clearInterval(keepaliveTimer);
       keepaliveTimer = undefined;
     }
-    if (recoveryHoldTimer) clearInterval(recoveryHoldTimer);
-    if (lagTimer) clearInterval(lagTimer);
     if (closeTimer) {
       clearTimeout(closeTimer);
       closeTimer = null;
     }
-    try {
-      session?.close();
-    } catch {
-      // already closed
-    }
+    cancelSession();
   });
   client.on("error", (err) => {
     diag.event("client_error", { error: errorLabel(err) });
     logger.warn({ request_id: requestId, error: errorLabel(err) }, "ws soniox client error");
+    errorClient("client error");
   });
 }
 
