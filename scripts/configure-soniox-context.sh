@@ -32,7 +32,7 @@ fi
 
 if [ "$STATUS_ONLY" = "1" ]; then
   if [ -f "$SONIOX_CONTEXT_FILE" ] && jq -e 'type == "object"' "$SONIOX_CONTEXT_FILE" >/dev/null 2>&1; then
-    jq '{general: (.general // [] | length), terms: (.terms // [] | length), text_chars: (.text // "" | length)}' "$SONIOX_CONTEXT_FILE"
+    jq '{text_chars: (.text // "" | length)}' "$SONIOX_CONTEXT_FILE"
   else
     printf 'context file is missing or invalid: %s\n' "$SONIOX_CONTEXT_FILE" >&2
     exit 1
@@ -61,4 +61,4 @@ mv "$tmp" "$SONIOX_CONTEXT_FILE"
 trap - EXIT
 
 printf 'context prompt written: %s\n' "$SONIOX_CONTEXT_FILE"
-jq '{general: (.general // [] | length), terms: (.terms // [] | length), text_chars: (.text // "" | length)}' "$SONIOX_CONTEXT_FILE"
+jq '{text_chars: (.text // "" | length)}' "$SONIOX_CONTEXT_FILE"

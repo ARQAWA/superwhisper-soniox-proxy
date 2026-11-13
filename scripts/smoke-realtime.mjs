@@ -82,7 +82,9 @@ const url =
   `&model=${encodeURIComponent(model)}&language=${encodeURIComponent(language)}` +
   `&interim_results=true&smart_format=true`;
 
-const ws = new WebSocket(url, { agent });
+// Pass the CA explicitly: a custom https agent can hide NODE_EXTRA_CA_CERTS
+// from the target TLS handshake on some Node builds.
+const ws = new WebSocket(url, { agent, ca: readFileSync(caPath) });
 let finalText = "";
 let interimText = "";
 let maxInterim = 0;

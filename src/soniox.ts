@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { SonioxNodeClient } from "@soniox/node";
+import { FetchHttpClient, SonioxNodeClient } from "@soniox/node";
 import type { RealtimeSttSession } from "@soniox/node";
 import type { TranscriptToken, TranscriptionContext } from "@soniox/node";
 import type { AppConfig } from "./config.js";
@@ -10,8 +10,10 @@ import {
 } from "./context.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
+import { sonioxLanguagePolicy, type SonioxLanguagePolicy } from "./language.js";
 import type { Logger } from "./logger.js";
 import type { ParsedFile } from "./types.js";
+import { createWarmFetch } from "./warmup.js";
 
 export interface SonioxResult {
   text: string;
@@ -28,6 +30,47 @@ function diagnosticParameters(
 ): Record<string, unknown> {
   const { context: _context, ...rest } = parameters;
   return context ? { ...rest, context: contextSummary(context) } : rest;
+}
+
+export interface RecognitionSettingsInput {
+  languageHints: string[];
+  identifyLanguage: boolean;
+  diarize: boolean;
+}
+
+export interface RecognitionSettings {
+  language_hints?: string[];
+  language_hints_strict?: boolean;
+  enable_language_identification: boolean;
+  enable_speaker_diarization: boolean;
+  context?: TranscriptionContext;
+}
+
+/**
+ * One recognition configuration for batch and realtime. Keeping it in one
+ * place guarantees both paths ask Soniox for the same language policy,
+ * diarization, and context instead of drifting apart.
+ */
+export function recognitionSettings(
+  config: AppConfig,
+  context: TranscriptionContext | null,
+  input: RecognitionSettingsInput,
+): RecognitionSettings {
+  return {
+    ...(input.languageHints.length > 0
+      ? {
+          language_hints: input.languageHints,
+          language_hints_strict: shouldUseStrictLanguage(
+            input.languageHints,
+            input.identifyLanguage,
+            config.SONIOX_LANGUAGE_HINTS_STRICT,
+          ),
+        }
+      : {}),
+    enable_language_identification: input.identifyLanguage,
+    enable_speaker_diarization: input.diarize,
+    ...(context ? { context } : {}),
+  };
 }
 
 class Semaphore {
@@ -100,16 +143,12 @@ function normalizeAudio(file: ParsedFile, fields: Record<string, string>): { dat
   };
 }
 
-function languageFromRequest(fields: Record<string, string>): { hints: string[]; identify: boolean; language: string } {
-  const raw = (fields.language ?? fields.language_code ?? fields.languageCode ?? "").trim().toLowerCase();
-  if (!raw || raw === "auto" || raw === "multi" || raw === "und") {
-    return { hints: ["ru", "en"], identify: true, language: "auto" };
-  }
-  const first = raw.split(/[-_,]/)[0];
-  if (/^[a-z]{2,3}$/.test(first)) {
-    return { hints: [first], identify: first !== "ru" && first !== "en", language: first };
-  }
-  return { hints: ["ru", "en"], identify: true, language: "auto" };
+function languageFromRequest(
+  fields: Record<string, string>,
+  autoLanguage: string,
+): SonioxLanguagePolicy {
+  const raw = fields.language ?? fields.language_code ?? fields.languageCode ?? "";
+  return sonioxLanguagePolicy(raw, autoLanguage);
 }
 
 export class SonioxService {
@@ -129,11 +168,21 @@ export class SonioxService {
     if (this.context) {
       logger.info({ ...contextSummary(this.context) }, "soniox context loaded");
     }
-    this.client = new SonioxNodeClient({ api_key: config.sonioxApiKey });
+    this.client = new SonioxNodeClient({
+      api_key: config.sonioxApiKey,
+      http_client: new FetchHttpClient({
+        base_url: config.SONIOX_API_BASE_URL,
+        default_headers: {
+          Authorization: `Bearer ${config.sonioxApiKey}`,
+          "Content-Type": "application/json",
+        },
+        fetch: createWarmFetch(config.SONIOX_API_BASE_URL),
+      }),
+    });
     this.semaphore = new Semaphore(config.SONIOX_MAX_CONCURRENCY);
   }
 
-  contextInfo(): { general: number; terms: number; text_chars: number } {
+  contextInfo(): { text_chars: number } {
     return contextSummary(this.context);
   }
 
@@ -149,20 +198,16 @@ export class SonioxService {
     maxEndpointDelayMs: number;
     clientReferenceId: string;
   }): RealtimeSttSession {
-    const languageHintsStrict = shouldUseStrictLanguage(
-      options.languageHints,
-      options.identifyLanguage,
-      this.config.SONIOX_LANGUAGE_HINTS_STRICT,
-    );
     const parameters = {
       model: this.config.SONIOX_REALTIME_MODEL,
       audio_format: "pcm_s16le" as const,
       sample_rate: options.sampleRate,
       num_channels: options.channels,
-      language_hints: options.languageHints,
-      language_hints_strict: languageHintsStrict,
-      enable_language_identification: options.identifyLanguage,
-      enable_speaker_diarization: options.diarize,
+      ...recognitionSettings(this.config, this.context, {
+        languageHints: options.languageHints,
+        identifyLanguage: options.identifyLanguage,
+        diarize: options.diarize,
+      }),
       client_reference_id: options.clientReferenceId,
       enable_endpoint_detection: options.endpointDetection,
       ...(options.endpointDetection
@@ -172,7 +217,6 @@ export class SonioxService {
             max_endpoint_delay_ms: options.maxEndpointDelayMs,
           }
         : {}),
-      ...(this.context ? { context: this.context } : {}),
     };
     const session = this.client.realtime.stt(parameters);
     session.on("connected", () => {
@@ -192,7 +236,7 @@ export class SonioxService {
     purpose = "request",
   ): Promise<SonioxResult> {
     const audio = normalizeAudio(file, fields);
-    const lang = languageFromRequest(fields);
+    const lang = languageFromRequest(fields, this.config.SONIOX_AUTO_LANGUAGE);
     const clientReferenceId = `sw-${randomUUID()}`;
     await this.semaphore.acquire();
     const started = Date.now();
@@ -204,15 +248,11 @@ export class SonioxService {
         wait: true,
         cleanup: ["file", "transcription"],
         client_reference_id: clientReferenceId,
-        language_hints: lang.hints,
-        language_hints_strict: shouldUseStrictLanguage(
-          lang.hints,
-          lang.identify,
-          this.config.SONIOX_LANGUAGE_HINTS_STRICT,
-        ),
-        enable_language_identification: lang.identify,
-        enable_speaker_diarization: diarize,
-        ...(this.context ? { context: this.context } : {}),
+        ...recognitionSettings(this.config, this.context, {
+          languageHints: lang.hints,
+          identifyLanguage: lang.identify,
+          diarize,
+        }),
         fetch_transcript: true,
         timeout_ms: this.config.SONIOX_TIMEOUT_MS,
         wait_options: {

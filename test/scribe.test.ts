@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
-import { applyScribeKeyterms, applyScribeVadTuning, forwardScribeFrame } from "../src/scribe.js";
+import { applyScribePolicy, applyScribeVadTuning, forwardScribeFrame } from "../src/scribe.js";
 
 interface SentFrame {
   data: WebSocket.RawData;
@@ -48,18 +48,39 @@ describe("Scribe VAD tuning", () => {
       expect(tuned.searchParams.get("token")).toBe("sutkn_test");
     }
   });
+
+  it("does not touch keyterms or no_verbatim during VAD tuning", () => {
+    const url = new URL(
+      "wss://api.elevenlabs.io/v1/speech-to-text/realtime?commit_strategy=vad&keyterms=Codex&no_verbatim=true&token=sutkn_test",
+    );
+    const tuned = applyScribeVadTuning(url, tuning);
+    expect(tuned.searchParams.getAll("keyterms")).toEqual(["Codex"]);
+    expect(tuned.searchParams.get("no_verbatim")).toBe("true");
+  });
+});
+
+describe("Scribe request policy", () => {
+  it("strips paid keyterms and forces verbatim", () => {
+    const url = new URL(
+      "wss://api.elevenlabs.io/v1/speech-to-text/realtime?keyterms=Codex&keyterms[]=Scribe&keyterm=Foo&no_verbatim=true&token=sutkn_test&custom=keep",
+    );
+    const tuned = applyScribePolicy(url, { verbatim: true });
+    expect(tuned.searchParams.getAll("keyterms")).toEqual([]);
+    expect(tuned.searchParams.getAll("keyterms[]")).toEqual([]);
+    expect(tuned.searchParams.getAll("keyterm")).toEqual([]);
+    expect(tuned.searchParams.get("no_verbatim")).toBe("false");
+    expect(tuned.searchParams.get("token")).toBe("sutkn_test");
+    expect(tuned.searchParams.get("custom")).toBe("keep");
+  });
+
+  it("can request cleanup explicitly", () => {
+    const url = new URL("wss://api.elevenlabs.io/v1/speech-to-text/realtime?token=sutkn_test");
+    const tuned = applyScribePolicy(url, { verbatim: false });
+    expect(tuned.searchParams.get("no_verbatim")).toBe("true");
+  });
 });
 
 describe("Scribe forwarding", () => {
-  it("appends context terms as keyterms without duplicating app terms", () => {
-    const url = new URL(
-      "wss://api.elevenlabs.io/v1/speech-to-text/realtime?model_id=scribe_v2_realtime&keyterms=Codex",
-    );
-    const added = applyScribeKeyterms(url, { terms: ["codex", "Soniox", "a-term-longer-than-twenty"] });
-    expect(added).toEqual(["Soniox"]);
-    expect(url.searchParams.getAll("keyterms")).toEqual(["Codex", "Soniox"]);
-  });
-
   it("forwards upstream text frames unchanged", () => {
     const client = fakeClient(WebSocket.OPEN);
     const frame = Buffer.from(JSON.stringify({ message_type: "committed_transcript", text: "готово" }));

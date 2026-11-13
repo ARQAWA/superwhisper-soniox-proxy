@@ -1,14 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
-import https from "node:https";
-import type { TranscriptionContext } from "@soniox/node";
 import { WebSocket } from "ws";
 import type { AppConfig } from "./config.js";
-import { configuredContext, scribeKeyterms } from "./context.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import type { Logger } from "./logger.js";
 import { redactQuery } from "./url-utils.js";
+import { elevenLabsAgent } from "./warmup.js";
 
 const HOP_BY_HOP = new Set([
   "connection",
@@ -30,30 +28,6 @@ const WS_HANDSHAKE_HEADERS = new Set([
   "sec-websocket-extensions",
   "sec-websocket-protocol",
 ]);
-
-// Reuse TLS sessions so the first Scribe socket after a proxy start does not
-// pay a full handshake while SuperWhisper is already recording.
-const scribeAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 8,
-  maxCachedSessions: 16,
-});
-
-export function warmScribeTls(host: string): void {
-  const request = https.request({
-    host,
-    port: 443,
-    path: "/",
-    method: "GET",
-    agent: scribeAgent,
-    timeout: 5000,
-  });
-  request.on("error", () => {
-    // Warm-up is best effort; a failed request leaves the normal path intact.
-  });
-  request.on("timeout", () => request.destroy());
-  request.end();
-}
 
 export interface ScribeDeps {
   config: AppConfig;
@@ -161,10 +135,25 @@ export function applyScribeVadTuning(url: URL, tuning: ScribeVadTuning): URL {
   return next;
 }
 
-export function applyScribeKeyterms(url: URL, context: TranscriptionContext | null): string[] {
-  const added = scribeKeyterms(context, url.searchParams.getAll("keyterms"));
-  for (const term of added) url.searchParams.append("keyterms", term);
-  return added;
+export interface ScribePolicy {
+  verbatim: boolean;
+}
+
+/**
+ * Keyterm prompting is billed separately, so the proxy never forwards it.
+ * `no_verbatim` is pinned instead of left to the upstream default: when the
+ * field is missing, Scribe cleans fillers, false starts, and repetitions.
+ */
+export function applyScribePolicy(url: URL, options: ScribePolicy): URL {
+  const next = new URL(url.toString());
+  const keytermNames = [
+    ...new Set(
+      [...next.searchParams.keys()].filter((name) => /^keyterms?(\[\])?$/i.test(name)),
+    ),
+  ];
+  for (const name of keytermNames) next.searchParams.delete(name);
+  next.searchParams.set("no_verbatim", options.verbatim ? "false" : "true");
+  return next;
 }
 
 export function forwardScribeFrame(
@@ -189,14 +178,10 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
         minSilenceDurationMs: config.SCRIBE_MIN_SILENCE_DURATION_MS,
       })
     : new URL(url.toString());
-  tunedUrl.searchParams.set("no_verbatim", "false");
-  const existingKeyterms = tunedUrl.searchParams.getAll("keyterms");
-  const addedKeyterms = config.SCRIBE_KEYTERMS
-    ? applyScribeKeyterms(tunedUrl, configuredContext(config, logger))
-    : [];
+  const upstreamUrl = applyScribePolicy(tunedUrl, { verbatim: config.SCRIBE_VERBATIM });
   const vadApplied =
     config.SCRIBE_VAD_TUNING && url.searchParams.get("commit_strategy") === "vad";
-  const target = `wss://${host}${tunedUrl.pathname}${tunedUrl.search}`;
+  const target = `wss://${host}${upstreamUrl.pathname}${upstreamUrl.search}`;
   const pending: ScribeFrame[] = [];
   let upstreamOpen = false;
   let lastClientFrameAt = 0;
@@ -207,7 +192,7 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
 
   const upstream = new WebSocket(target, {
     headers: copyUpstreamHeaders(req),
-    agent: scribeAgent,
+    agent: elevenLabsAgent,
     perMessageDeflate: false,
     handshakeTimeout: 10_000,
     rejectUnauthorized: true,
@@ -224,17 +209,20 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
       config_model: config.SCRIBE_MODEL,
       mode: "scribe",
       vad_tuning: vadApplied,
+      no_verbatim: upstreamUrl.searchParams.get("no_verbatim"),
+      keyterms_removed: [...url.searchParams.keys()].filter((name) =>
+        /^keyterms?(\[\])?$/i.test(name),
+      ).length,
       vad_silence_threshold_secs: vadApplied
-        ? numericQueryParam(tunedUrl, "vad_silence_threshold_secs")
+        ? numericQueryParam(upstreamUrl, "vad_silence_threshold_secs")
         : null,
-      vad_threshold: vadApplied ? numericQueryParam(tunedUrl, "vad_threshold") : null,
+      vad_threshold: vadApplied ? numericQueryParam(upstreamUrl, "vad_threshold") : null,
       min_speech_duration_ms: vadApplied
-        ? numericQueryParam(tunedUrl, "min_speech_duration_ms")
+        ? numericQueryParam(upstreamUrl, "min_speech_duration_ms")
         : null,
       min_silence_duration_ms: vadApplied
-        ? numericQueryParam(tunedUrl, "min_silence_duration_ms")
+        ? numericQueryParam(upstreamUrl, "min_silence_duration_ms")
         : null,
-      keyterms: existingKeyterms.length + addedKeyterms.length,
     },
     "scribe ws upstream connecting",
   );
@@ -276,7 +264,7 @@ export function scribeWebSocket(req: IncomingMessage, client: WebSocket, deps: S
 
   upstream.on("open", () => {
     upstreamOpen = true;
-    diagnostics.recordRequestParameters("scribe", requestParameters(tunedUrl));
+    diagnostics.recordRequestParameters("scribe", requestParameters(upstreamUrl));
     logger.info(
       { request_id: requestId, connect_ms: Date.now() - connectStartedAt },
       "scribe ws upstream open",

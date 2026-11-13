@@ -8,6 +8,8 @@
 > Do not add app configuration steps. Do not open, quit, or inspect the app.
 > If a user asks for app configuration, refuse and point to this rule.
 
+For a short install and update checklist, see `INSTALL.md`.
+
 ## Install on a new Mac
 
 This installs the local proxy that makes SuperWhisper's built-in **Nova 3** voice model use **Soniox STT v6** for both batch and realtime dictation. The proxy never reads or modifies SuperWhisper.
@@ -65,7 +67,7 @@ The installer will:
 9. Write the managed recognition prompt to
     `~/.config/soniox-proxy/context.json`.
 10. Apply the quality profile: strict single-language Soniox recognition,
-    Soniox context terms, Scribe keyterms, and a `1 s` Scribe VAD.
+    a free-text Soniox prompt, verbatim Scribe output, and a `1 s` Scribe VAD.
 
 The installer never reads or modifies SuperWhisper. An existing context prompt
 and existing Soniox LaunchAgent settings are preserved. Use `--clean` when the
@@ -118,7 +120,10 @@ The installer can install Node, pnpm, and jq through Homebrew. If Homebrew is no
 | Wi-Fi PAC proxy `127.0.0.1:8443` | `scripts/teardown.sh` |
 | Context prompt `~/.config/soniox-proxy/context.json` | Delete the file or restore its timestamped backup |
 
-The CA is local-only. Soniox target audio goes to Soniox, and Scribe target audio goes to ElevenLabs. The PAC file routes only the allowlisted hosts through the proxy; every other host stays direct.
+The CA is local-only. Soniox target audio goes to Soniox. Scribe realtime audio
+goes to ElevenLabs; Scribe file-mode audio goes to SuperWhisper's backend, which
+forwards it to ElevenLabs. The PAC file routes only the allowlisted hosts
+through the proxy; every other host stays direct.
 
 ## Verify
 
@@ -136,10 +141,14 @@ dictation and reduces wrong-script output. Automatic or multi-language requests
 stay non-strict, because Soniox documents that strict mode with several hints
 is less robust.
 
+The Nova picker has no automatic option. Selecting Hindi (`hi`) makes the proxy
+omit `language_hints` and enable Soniox language identification.
+`SONIOX_AUTO_LANGUAGE` changes the sentinel.
+
 The managed prompt in `~/.config/soniox-proxy/context.json` is sent as Soniox
-`context`. Put domain terms and names in `terms`, and a short background in
-`text`. Soniox recommends a few short general pairs and a small term list. Edit
-the file, then run:
+`context`. Only `text` is used; `terms` and `general` are ignored because
+provider term lists were rewriting ordinary words. Write a short background in
+`text`, then run:
 
 ```bash
 bash ~/.local/share/superwhisper-soniox-proxy/scripts/start-fast.sh
@@ -154,22 +163,25 @@ leak into recognition.
 `min_silence_duration_ms=100`. The only deliberate difference is
 `vad_silence_threshold_secs=1` instead of the provider default `1.5`, because
 SuperWhisper closes its socket about 1.5 s after the user stops and a 1.5 s
-commit misses the last sentence. `no_verbatim=false` keeps filler words and
-false starts.
+commit misses the last sentence. The proxy strips every
+`keyterms`/`keyterms[]` parameter because keyterm prompting is billed
+separately, and sets `no_verbatim=false` so filler words, false starts, and
+repetitions are kept. Without an explicit value, Scribe falls back to cleanup
+and deletes them.
 
-The same context terms are added as Scribe `keyterms` (up to 50 terms, 20
-characters each). This improves names and product terms. ElevenLabs bills
-keyterm prompting at an additional rate; set `SCRIBE_KEYTERMS=false` to disable
-it.
+SuperWhisper's file-mode Scribe upload goes to
+`https://api.superwhisper.com/elevenlabs/v1/transcribe`. The proxy intercepts
+it, drops `keyterms[]`, writes `no_verbatim=false`, and forwards the audio with
+the language and diarization fields.
 
 **Unexpected short tokens.** There is no public Soniox report of a specific
 `ЛЗ`/`ЗЗ` substitution. Soniox v6 does return spoken punctuation and formatting
 commands as words by design, and it can substitute a similar term when the
-audio is ambiguous. The strict language hint, the context terms, and the clean
-context prompt address the common causes. If a specific artifact repeats, add
-the term to the context file, or ask the user to add a replacement in
-SuperWhisper. Do not change app settings yourself. Do not add generic
-word-to-punctuation replacements; they also rewrite normal prose.
+audio is ambiguous. The strict language hint and the clean free-text prompt
+address the common causes. Term lists are no longer sent. If a specific
+artifact repeats, ask the user to add a replacement in SuperWhisper. Do not
+change app settings yourself. Do not add generic word-to-punctuation
+replacements; they also rewrite normal prose.
 
 ## Upgrade an old install
 

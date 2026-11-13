@@ -153,6 +153,7 @@ export interface ForwardRequest {
   body: Buffer;
   bodyStream?: IncomingMessage;
   timeoutMs: number;
+  agent?: https.Agent;
 }
 
 export interface StreamingForwardResult {
@@ -173,6 +174,7 @@ export async function forwardStreamingRequest(
         method: req.method,
         path: req.path,
         headers: cleanRequestHeaders(req.headers, req.hostname, req.body, true),
+        agent: req.agent,
         servername: req.hostname,
         rejectUnauthorized: true,
         lookup: lookupBypassingHosts as never,
@@ -237,6 +239,7 @@ export async function forwardRequest(req: ForwardRequest): Promise<UpstreamRespo
         method: req.method,
         path: req.path,
         headers: cleanRequestHeaders(req.headers, req.hostname, req.body),
+        agent: req.agent,
         servername: req.hostname,
         rejectUnauthorized: true,
         lookup: lookupBypassingHosts as never,

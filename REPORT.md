@@ -228,6 +228,46 @@ Verification:
 
 Criterion 12 is limited by Soniox async processing latency, not by the proxy. Batch requests are submitted immediately; the remaining time is Soniox queue/processing time. Realtime dictation avoids this latency entirely.
 
+### Quality parity, Scribe file mode, warm connections (2026-11-13)
+
+The recognition path was tightened around one configuration shared by batch and
+realtime Soniox calls (`recognitionSettings` in `src/soniox.ts`): same language
+hints, `language_hints_strict`, language identification, diarization, and
+free-text context. Provider term lists were removed from the context file and
+the code ignores `terms` and `general`, because those lists were rewriting
+ordinary words. Scribe `keyterms` are stripped because they are billed
+separately, and the proxy pins `no_verbatim=false` so Scribe stays verbatim.
+
+Scribe file mode was found in the app binary: it posts multipart audio to
+`https://api.superwhisper.com/elevenlabs/v1/transcribe` with `language_code`,
+`no_verbatim`, `keyterms[]`, and `diarize`. The proxy now MITMs that host only
+while `SCRIBE_BATCH_ENABLED=true`, drops `keyterms[]`, writes
+`no_verbatim=false`, keeps the language, diarization, and audio, and forwards
+the upload. Other traffic on the host is streamed through.
+`SCRIBE_BATCH_ENABLED=false` restores the old raw tunnel.
+
+The proxy keeps one keep-alive connection per provider and probes every
+`WARMUP_INTERVAL_MS` (30 s by default). Soniox REST uses a custom fetch adapter
+over a keep-alive agent; the Scribe WebSocket reuses the warm ElevenLabs socket.
+
+Verification:
+
+- `pnpm test`: 49 tests pass; `pnpm build`: pass.
+- Health reports `scribe_batch_enabled=true`, `warmup_enabled=true`, and warm
+  probes with statuses: Soniox API 200, ElevenLabs 404, SuperWhisper 404,
+  Soniox realtime host 404. 404 is expected for the bare probe paths.
+- `smoke-target.sh` through the new build: HTTP 200, 85 chars, 11 words,
+  5.303 s fixture; the Soniox upload, polling, and cleanup all went through the
+  warm fetch adapter.
+- `smoke-realtime.mjs` through the same build: 85 chars, 11 words, no
+  truncation. Batch and realtime now produce the same text on the same fixture.
+- A synthetic multipart upload to the Scribe batch path was intercepted and
+  logged `dropped_fields=["keyterms[]"]` with `no_verbatim=false`;
+  SuperWhisper answered 401 because the test request carried no app auth, as
+  expected.
+- `api.superwhisper.com` non-transcribe traffic still passed through (404 for
+  the bare root).
+
 ## Known limitations
 
 - **Batch latency** remains above the 3 s target (p95 ≈ 4.1 s).

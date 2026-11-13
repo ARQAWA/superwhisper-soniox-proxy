@@ -9,14 +9,19 @@ import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
 import { errorPayload, readRequestBody, sendJson, sendUpstreamResponse, upstreamErrorStatus } from "./http-utils.js";
 import type { Logger } from "./logger.js";
-import { parseMultipart } from "./multipart.js";
+import { parseMultipart, rewriteScribeBatch } from "./multipart.js";
 import { SonioxService } from "./soniox.js";
 import { attachWebSocketHandler } from "./realtime.js";
-import { warmScribeTls } from "./scribe.js";
 import { describeSchema, loadTemplate, renderDeepgramLikeResponse, sanitizeForTemplate } from "./template.js";
 import type { ParsedMultipart, RequestMeta, RequestSummary } from "./types.js";
 import { forwardRequest, forwardStreamingRequest, resolveRealHost } from "./upstream.js";
 import { redactQuery } from "./url-utils.js";
+import {
+  createWarmup,
+  elevenLabsAgent,
+  superwhisperAgent,
+  type WarmupHandle,
+} from "./warmup.js";
 
 interface CaptureRecord {
   captured_at: string;
@@ -151,10 +156,11 @@ export interface ProxyDeps {
   soniox: SonioxService;
   diagnostics: Diagnostics;
   runtime?: ProxyRuntime;
+  warmup?: WarmupHandle;
 }
 
 export function createRequestHandler(deps: ProxyDeps) {
-  const { config, logger, soniox, diagnostics, runtime } = deps;
+  const { config, logger, soniox, diagnostics, runtime, warmup } = deps;
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const requestId = randomUUID();
@@ -199,8 +205,7 @@ export function createRequestHandler(deps: ProxyDeps) {
         ws_mode: config.WS_MODE,
         soniox_realtime_model: config.SONIOX_REALTIME_MODEL,
         soniox_language_hints_strict: config.SONIOX_LANGUAGE_HINTS_STRICT,
-        soniox_context_general: sonioxContext.general,
-        soniox_context_terms: sonioxContext.terms,
+        soniox_auto_language: config.SONIOX_AUTO_LANGUAGE,
         soniox_context_text_chars: sonioxContext.text_chars,
         soniox_endpoint_detection: config.SONIOX_ENDPOINT_DETECTION,
         soniox_endpoint_sensitivity: config.SONIOX_ENDPOINT_SENSITIVITY,
@@ -216,12 +221,18 @@ export function createRequestHandler(deps: ProxyDeps) {
         scribe_path: config.SCRIBE_PATH,
         scribe_model: config.SCRIBE_MODEL,
         scribe_voice_model_id: config.SCRIBE_VOICE_MODEL_ID,
-        scribe_keyterms: config.SCRIBE_KEYTERMS,
+        superwhisper_host: config.SUPERWHISPER_HOST,
+        scribe_batch_enabled: config.SCRIBE_BATCH_ENABLED,
+        scribe_batch_path: config.SCRIBE_BATCH_PATH,
         scribe_vad_tuning: config.SCRIBE_VAD_TUNING,
+        scribe_verbatim: config.SCRIBE_VERBATIM,
         scribe_vad_silence_threshold_secs: config.SCRIBE_VAD_SILENCE_THRESHOLD_SECS,
         scribe_vad_threshold: config.SCRIBE_VAD_THRESHOLD,
         scribe_min_speech_duration_ms: config.SCRIBE_MIN_SPEECH_DURATION_MS,
         scribe_min_silence_duration_ms: config.SCRIBE_MIN_SILENCE_DURATION_MS,
+        warmup_enabled: config.WARMUP_ENABLED,
+        warmup_interval_ms: config.WARMUP_INTERVAL_MS,
+        warmup: warmup?.status() ?? null,
         proxy_allowed_hosts: config.PROXY_ALLOWED_HOSTS,
         pac_path: config.PAC_PATH,
         uptime_seconds: Math.round(process.uptime()),
@@ -231,7 +242,15 @@ export function createRequestHandler(deps: ProxyDeps) {
       return;
     }
 
-    if (host === config.SCRIBE_HOST) {
+    const superwhisperBatch =
+      config.SCRIBE_BATCH_ENABLED &&
+      host === config.SUPERWHISPER_HOST &&
+      req.method === "POST" &&
+      path === config.SCRIBE_BATCH_PATH;
+    const streamingPassThrough =
+      host === config.SCRIBE_HOST || (host === config.SUPERWHISPER_HOST && !superwhisperBatch);
+
+    if (streamingPassThrough) {
       try {
         const streamed = await forwardStreamingRequest(
           {
@@ -243,6 +262,7 @@ export function createRequestHandler(deps: ProxyDeps) {
             body: Buffer.alloc(0),
             bodyStream: req,
             timeoutMs: config.UPSTREAM_TIMEOUT_MS,
+            agent: host === config.SCRIBE_HOST ? elevenLabsAgent : superwhisperAgent,
           },
           res,
         );
@@ -339,6 +359,65 @@ export function createRequestHandler(deps: ProxyDeps) {
       },
       "proxy request",
     );
+
+    if (superwhisperBatch) {
+      try {
+        const rewritten =
+          parsed && /^multipart\/form-data/i.test(contentType)
+            ? rewriteScribeBatch(parsed, { verbatim: config.SCRIBE_VERBATIM })
+            : null;
+        const canRewrite = rewritten !== null;
+        const upstream = await forwardRequest({
+          hostname: host,
+          port: 443,
+          method: meta.method,
+          path: rawUrl.startsWith("http") ? `${url.pathname}${url.search}` : rawUrl,
+          headers: rewritten ? { ...req.headers, "content-type": rewritten.contentType } : req.headers,
+          body: rewritten ? rewritten.body : body,
+          timeoutMs: config.UPSTREAM_TIMEOUT_MS,
+          agent: superwhisperAgent,
+        });
+        sendUpstreamResponse(res, upstream);
+        logger.info(
+          {
+            request_id: requestId,
+            status: upstream.status,
+            host,
+            path,
+            rewritten: canRewrite,
+            audio_bytes: parsed?.audio?.size ?? 0,
+            dropped_fields: rewritten?.droppedFields ?? [],
+            no_verbatim: rewritten?.noVerbatim ?? null,
+            upstream_forwarded: true,
+            latency_ms: Date.now() - started,
+          },
+          "proxy response (scribe batch)",
+        );
+        return;
+      } catch (err) {
+        const status = upstreamErrorStatus(err);
+        logger.error(
+          {
+            request_id: requestId,
+            status,
+            host,
+            path,
+            upstream_forwarded: false,
+            latency_ms: Date.now() - started,
+            error: errorLabel(err),
+          },
+          "scribe batch request failed",
+        );
+        diagnostics.recordError("scribe_batch", err, {
+          request_id: requestId,
+          status,
+          latency_ms: Date.now() - started,
+        });
+        if (res.headersSent) res.destroy(err instanceof Error ? err : undefined);
+        else sendJson(res, status, errorPayload(err instanceof Error ? err.message : "scribe batch error", "scribe_batch_error"));
+        return;
+      }
+    }
 
     if (summary.targetMatched && !config.DRY_RUN) {
       try {
@@ -491,14 +570,11 @@ export interface ProxyHandle {
 export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const { config, logger } = deps;
   const runtime: ProxyRuntime = { mitmEnabled: false, instanceId: randomUUID() };
-  const handler = createRequestHandler({ ...deps, runtime });
+  const warmup = deps.warmup ?? createWarmup(config, logger);
+  const handler = createRequestHandler({ ...deps, runtime, warmup });
+  warmup.start();
   const servers: http.Server[] = [];
   const sockets = new Set<net.Socket>();
-  const scribeWarmTimer = config.SCRIBE_ENABLED
-    ? setInterval(() => warmScribeTls(config.SCRIBE_HOST), 10 * 60 * 1000)
-    : undefined;
-  scribeWarmTimer?.unref?.();
-  if (config.SCRIBE_ENABLED) warmScribeTls(config.SCRIBE_HOST);
   const trackSocket = (socket: net.Socket): void => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
@@ -561,8 +637,12 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   const onConnect = (req: IncomingMessage, clientSocket: net.Socket, head: Buffer): void => {
     trackSocket(clientSocket);
     const { hostname, port } = splitHostPort(req.url ?? "");
-    const scribeMitm = config.SCRIBE_ENABLED && hostname === config.SCRIBE_HOST;
-    if ((hostname === config.TARGET_HOST || scribeMitm) && tlsServer) {
+    const superwhisperMitm = config.SCRIBE_BATCH_ENABLED && hostname === config.SUPERWHISPER_HOST;
+    const mitmHost =
+      hostname === config.TARGET_HOST ||
+      superwhisperMitm ||
+      (config.SCRIBE_ENABLED && hostname === config.SCRIBE_HOST);
+    if (mitmHost && tlsServer) {
       clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
       if (head.length > 0) clientSocket.unshift(head);
       tlsServer.emit("connection", clientSocket);
@@ -617,7 +697,7 @@ export async function startProxy(deps: ProxyDeps): Promise<ProxyHandle> {
   return {
     port: config.PROXY_PORT,
     close: async () => {
-      clearInterval(scribeWarmTimer);
+      warmup.stop();
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       if (tlsServer) tlsServer.close();

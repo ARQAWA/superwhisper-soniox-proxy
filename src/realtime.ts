@@ -8,6 +8,7 @@ import type { RealtimeResult, RealtimeSttSession, RealtimeToken } from "@soniox/
 import type { AppConfig } from "./config.js";
 import type { Diagnostics } from "./diagnostics.js";
 import { errorLabel } from "./errors.js";
+import { sonioxLanguagePolicy } from "./language.js";
 import type { Logger } from "./logger.js";
 import { SonioxService } from "./soniox.js";
 import { scribeWebSocket } from "./scribe.js";
@@ -266,8 +267,9 @@ function sonioxWebSocket(req: IncomingMessage, client: WebSocket, deps: WsDeps):
   const sampleRate = Number(url.searchParams.get("sample_rate") ?? 16000);
   const channels = Number(url.searchParams.get("channels") ?? 1);
   const language = (url.searchParams.get("language") ?? "auto").toLowerCase();
-  const languageHints = language && !["auto", "multi", "und"].includes(language) ? [language.split("-")[0]] : ["ru", "en"];
-  const identifyLanguage = ["auto", "multi", "und"].includes(language);
+  const languagePolicy = sonioxLanguagePolicy(language, config.SONIOX_AUTO_LANGUAGE);
+  const languageHints = languagePolicy.hints;
+  const identifyLanguage = languagePolicy.identify;
   const diarize = url.searchParams.get("diarize") === "true";
   const actualSampleRate = Number.isFinite(sampleRate) ? sampleRate : 16000;
   const actualChannels = Number.isFinite(channels) ? channels : 1;

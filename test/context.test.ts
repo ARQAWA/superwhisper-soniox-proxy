@@ -4,23 +4,20 @@ import {
   contextSummary,
   mergeContexts,
   parseContext,
-  scribeKeyterms,
   shouldUseStrictLanguage,
 } from "../src/context.js";
 
 describe("Soniox context", () => {
-  it("parses the supported fields and drops unknown ones", () => {
+  it("keeps only the free-text prompt and drops word lists", () => {
     const context = parseContext({
       general: [{ key: "domain", value: "software" }],
       text: "  Technical dictation.  ",
       terms: ["Soniox", " soniox ", "Scribe"],
       translation_terms: [{ source: "a", target: "b" }],
     });
-    expect(context).toEqual({
-      general: [{ key: "domain", value: "software" }],
-      text: "Technical dictation.",
-      terms: ["Soniox", "Scribe"],
-    });
+    expect(context).toEqual({ text: "Technical dictation." });
+    expect(context).not.toHaveProperty("terms");
+    expect(context).not.toHaveProperty("general");
     expect(context).not.toHaveProperty("translation_terms");
   });
 
@@ -29,21 +26,22 @@ describe("Soniox context", () => {
     expect(parseContext([])).toBeNull();
     expect(parseContext({})).toBeNull();
     expect(parseContext({ terms: [] })).toBeNull();
+    expect(parseContext({ terms: ["Soniox"] })).toBeNull();
   });
 
-  it("merges file and environment context without duplicates", () => {
+  it("merges text prompts without duplicates", () => {
     const merged = mergeContexts(
-      { text: "File context", terms: ["Soniox", "Scribe"] },
-      { text: "Env context", terms: ["scribe", "Codex"] },
+      { text: "File context" },
+      { text: "Env context" },
+      { text: "file CONTEXT" },
     );
     expect(merged?.text).toBe("File context\n\nEnv context");
-    expect(merged?.terms).toEqual(["Soniox", "Scribe", "Codex"]);
   });
 
   it("builds context from the environment", () => {
-    const context = contextFromEnv("", " Soniox, Scribe ,, ");
-    expect(context?.terms).toEqual(["Soniox", "Scribe"]);
-    expect(contextSummary(context)).toEqual({ general: 0, terms: 2, text_chars: 0 });
+    const context = contextFromEnv("  Keep English terms.  ");
+    expect(context).toEqual({ text: "Keep English terms." });
+    expect(contextSummary(context)).toEqual({ text_chars: 19 });
   });
 
   it("uses strict language only for one explicit hint", () => {
@@ -52,17 +50,5 @@ describe("Soniox context", () => {
     expect(shouldUseStrictLanguage(["ru", "en"], false, true)).toBe(false);
     expect(shouldUseStrictLanguage([], false, true)).toBe(false);
     expect(shouldUseStrictLanguage(["ru"], false, false)).toBe(false);
-  });
-
-  it("limits Scribe keyterms to the provider contract", () => {
-    const terms = [
-      "Soniox",
-      "soniox",
-      "Scribe",
-      "a-very-long-term-over-twenty-chars",
-      "Codex",
-    ];
-    const selected = scribeKeyterms({ terms }, ["scribe"]);
-    expect(selected).toEqual(["Soniox", "Codex"]);
   });
 });

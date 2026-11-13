@@ -1,8 +1,8 @@
 #!/bin/bash
-# Apply the provider-recommended quality profile and restart the proxy.
-# Soniox and Scribe both run their documented defaults, which favor
-# recognition quality over endpoint latency. SuperWhisper is never read or
-# modified; only the proxy and its LaunchAgent are touched.
+# Apply the quality-first profile and restart the proxy. Soniox waits for
+# additional context before committing an endpoint, and Scribe stays verbatim
+# without paid keyterms. SuperWhisper is never read or modified; only the proxy
+# and its LaunchAgent are touched.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -34,17 +34,19 @@ fi
 export WS_MODE="${WS_MODE:-soniox}"
 export DRY_RUN="${DRY_RUN:-false}"
 export SONIOX_LANGUAGE_HINTS_STRICT="${SONIOX_LANGUAGE_HINTS_STRICT:-true}"
+export SONIOX_AUTO_LANGUAGE="${SONIOX_AUTO_LANGUAGE:-hi}"
 export SONIOX_ENDPOINT_DETECTION="${SONIOX_ENDPOINT_DETECTION:-true}"
 export SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL="${SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL:-0}"
-export SONIOX_ENDPOINT_SENSITIVITY="${SONIOX_ENDPOINT_SENSITIVITY:-0}"
-export SONIOX_MAX_ENDPOINT_DELAY_MS="${SONIOX_MAX_ENDPOINT_DELAY_MS:-2000}"
+export SONIOX_ENDPOINT_SENSITIVITY="${SONIOX_ENDPOINT_SENSITIVITY:--1}"
+export SONIOX_MAX_ENDPOINT_DELAY_MS="${SONIOX_MAX_ENDPOINT_DELAY_MS:-3000}"
 export SCRIBE_VAD_TUNING=true
 export SCRIBE_ENABLED="${SCRIBE_ENABLED:-true}"
 export SCRIBE_HOST="${SCRIBE_HOST:-api.elevenlabs.io}"
 export SCRIBE_PATH="${SCRIBE_PATH:-/v1/speech-to-text/realtime}"
 export SCRIBE_MODEL="${SCRIBE_MODEL:-scribe_v2_realtime}"
 export SCRIBE_VOICE_MODEL_ID="${SCRIBE_VOICE_MODEL_ID:-sw-elevenlabs-scribe}"
-export SCRIBE_KEYTERMS="${SCRIBE_KEYTERMS:-true}"
+export SCRIBE_BATCH_ENABLED="${SCRIBE_BATCH_ENABLED:-true}"
+export SCRIBE_VERBATIM="${SCRIBE_VERBATIM:-true}"
 export SCRIBE_VAD_SILENCE_THRESHOLD_SECS=1
 export SCRIBE_VAD_THRESHOLD=0.4
 export SCRIBE_MIN_SPEECH_DURATION_MS=100
@@ -75,15 +77,20 @@ if [ -f "$LAUNCHD_PLIST" ]; then
   fi
   plist_set_env SONIOX_ENDPOINT_DETECTION true
   plist_set_env SONIOX_LANGUAGE_HINTS_STRICT "$SONIOX_LANGUAGE_HINTS_STRICT"
+  plist_set_env SONIOX_AUTO_LANGUAGE "$SONIOX_AUTO_LANGUAGE"
   plist_set_env SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL 0
-  plist_set_env SONIOX_ENDPOINT_SENSITIVITY 0
-  plist_set_env SONIOX_MAX_ENDPOINT_DELAY_MS 2000
+  plist_set_env SONIOX_ENDPOINT_SENSITIVITY -1
+  plist_set_env SONIOX_MAX_ENDPOINT_DELAY_MS 3000
   plist_set_env SCRIBE_VAD_TUNING true
-  plist_set_env SCRIBE_KEYTERMS "$SCRIBE_KEYTERMS"
+  plist_set_env SCRIBE_BATCH_ENABLED "$SCRIBE_BATCH_ENABLED"
+  plist_set_env SCRIBE_VERBATIM "$SCRIBE_VERBATIM"
   plist_set_env SCRIBE_VAD_SILENCE_THRESHOLD_SECS 1
   plist_set_env SCRIBE_VAD_THRESHOLD 0.4
   plist_set_env SCRIBE_MIN_SPEECH_DURATION_MS 100
   plist_set_env SCRIBE_MIN_SILENCE_DURATION_MS 100
+  if /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:SCRIBE_KEYTERMS" "$LAUNCHD_PLIST" >/dev/null 2>&1; then
+    /usr/libexec/PlistBuddy -c "Delete :EnvironmentVariables:SCRIBE_KEYTERMS" "$LAUNCHD_PLIST" >/dev/null
+  fi
   plutil -lint "$LAUNCHD_PLIST" >/dev/null
 fi
 
@@ -94,7 +101,7 @@ launchd_pid() {
 }
 
 profile_health_ok() {
-  proxy_health_json | jq -e --arg strict "$SONIOX_LANGUAGE_HINTS_STRICT" '
+  proxy_health_json | jq -e --arg strict "$SONIOX_LANGUAGE_HINTS_STRICT" --arg auto "$SONIOX_AUTO_LANGUAGE" --arg verbatim "$SCRIBE_VERBATIM" '
     .ok == true
     and .target_host == "api.deepgram.com"
     and .target_path == "/v1/listen"
@@ -106,15 +113,19 @@ profile_health_ok() {
     and .mitm_enabled == true
     and .scribe_vad_tuning == true
     and .scribe_enabled == true
+    and .scribe_batch_enabled == true
     and .scribe_host == "api.elevenlabs.io"
     and .scribe_path == "/v1/speech-to-text/realtime"
     and .scribe_model == "scribe_v2_realtime"
     and .scribe_voice_model_id == "sw-elevenlabs-scribe"
+    and .warmup_enabled == true
     and .soniox_endpoint_detection == true
     and ($strict != "true" or .soniox_language_hints_strict == true)
-    and .soniox_endpoint_sensitivity == 0
+    and .soniox_auto_language == $auto
+    and .soniox_endpoint_sensitivity == -1
     and .soniox_endpoint_latency_adjustment_level == 0
-    and .soniox_max_endpoint_delay_ms == 2000
+    and .soniox_max_endpoint_delay_ms == 3000
+    and (.scribe_verbatim == ($verbatim == "true"))
     and .scribe_vad_silence_threshold_secs == 1
     and .scribe_vad_threshold == 0.4
     and .scribe_min_speech_duration_ms == 100

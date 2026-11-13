@@ -2,13 +2,16 @@
 
 > **AI agents: read [`AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md`](AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md) first.**
 
+> For a short install and update checklist, see [`INSTALL.md`](INSTALL.md).
+
 A local TypeScript proxy that lets **SuperWhisper 3.2.1** use **Soniox STT v6** for its built-in **Nova 3** voice model, including realtime dictation. SuperWhisper itself is not patched: the proxy is selected through the normal macOS HTTPS proxy setting, and the app keeps passing its own code-signature checks.
 
 ## What works
 
 - **Batch** (`POST https://api.deepgram.com/v1/listen`, `model=nova-3`) is answered by Soniox `stt-async-v6` with a Deepgram-shaped JSON response.
 - **Realtime** (`wss://api.deepgram.com/v1/listen`, the app sends `model=nova-2` for Nova 3 modes) is bridged to Soniox `stt-rt-v6` and streamed back as Deepgram `Results` messages.
-- **Scribe** (`wss://api.elevenlabs.io/v1/speech-to-text/realtime`, the app's `sw-elevenlabs-scribe` mode) is forwarded live. Every partial and `committed_transcript` is relayed without batch buffering or suppression, so the app receives the final before its own close timeout.
+- **Scribe realtime** (`wss://api.elevenlabs.io/v1/speech-to-text/realtime`, the app's `sw-elevenlabs-scribe` mode) is forwarded live. Every partial and `committed_transcript` is relayed without batch buffering or suppression, so the app receives the final before its own close timeout.
+- **Scribe file mode** (`POST https://api.superwhisper.com/elevenlabs/v1/transcribe`) is intercepted. The proxy keeps verbatim output (`no_verbatim=false`), removes the paid `keyterms[]` field, keeps the language, diarization, and audio, and forwards the upload to SuperWhisper.
 - **Pass-through** for every other host, path, and model is unchanged. `api.superwhisper.com` model/license traffic and non-target Deepgram models still work.
 - Target audio is **never forwarded to Deepgram**. Logs record `upstream_forwarded=false` for intercepted requests.
 - The proxy listens on loopback only (`127.0.0.1:8443` and `[::1]:8443`).
@@ -23,6 +26,7 @@ local proxy (Node/TypeScript)
    ├─ batch  /v1/listen + model=nova-3              → Soniox stt-async-v6
    ├─ realtime /v1/listen (WS, nova-2/nova-3)       → Soniox stt-rt-v6
    ├─ realtime /v1/speech-to-text/realtime         → ElevenLabs Scribe (live)
+   ├─ batch    /elevenlabs/v1/transcribe           → SuperWhisper → ElevenLabs
    └─ everything else                               → real upstream over TLS
 ```
 
@@ -35,6 +39,9 @@ curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/ma
 ```
 
 The installer handles Homebrew dependencies, the Keychain key prompt, the local CA, the LaunchAgent, and the system proxy. It never reads or modifies SuperWhisper. See [`AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md`](AI_AGENT_READ_ME_FIRST_INSTALL_PROMPT.md) for details, update/uninstall steps, and troubleshooting.
+
+For a copy-paste checklist that another machine or agent can follow, see
+[`INSTALL.md`](INSTALL.md).
 
 Re-run the same command to upgrade an old install. The current installer requires a clean checkout on the requested branch and only fast-forwards it. It rebuilds `dist/`, verifies certificates, and applies the quality profile. It never touches SuperWhisper. Download the current installer first; an old installed copy may still reset local changes: `curl -fsSL https://raw.githubusercontent.com/ARQAWA/superwhisper-soniox-proxy/main/install.sh -o /tmp/install.sh && bash /tmp/install.sh --upgrade`.
 
@@ -80,7 +87,7 @@ What setup does:
 7. Writes the managed recognition prompt to `~/.config/soniox-proxy/context.json`.
 8. Does not read or modify SuperWhisper.
 9. `start-fast.sh` applies the quality profile: strict single-language Soniox,
-   Soniox context terms, Scribe keyterms, and a `1 s` Scribe VAD.
+   a free-text Soniox prompt, verbatim Scribe output, and a `1 s` Scribe VAD.
 10. With `--smoke`, runs the batch, pass-through, and realtime checks.
 
 Create or select a SuperWhisper mode yourself.
@@ -181,7 +188,10 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SCRIBE_PATH` | `/v1/speech-to-text/realtime` | Scribe realtime path |
 | `SCRIBE_VOICE_MODEL_ID` | `sw-elevenlabs-scribe` | Status label only |
 | `SCRIBE_MODEL` | `scribe_v2_realtime` | Expected upstream realtime model |
-| `SCRIBE_KEYTERMS` | `true` | Add the context terms as Scribe keyterms (extra provider cost) |
+| `SCRIBE_VERBATIM` | `true` | Keep filler words and repetitions (`no_verbatim=false`); keyterms are always removed |
+| `SUPERWHISPER_HOST` | `api.superwhisper.com` | Host that carries the Scribe file upload |
+| `SCRIBE_BATCH_ENABLED` | `true` | Intercept the Scribe file upload |
+| `SCRIBE_BATCH_PATH` | `/elevenlabs/v1/transcribe` | Scribe file-mode path |
 | `SCRIBE_VAD_TUNING` | `true` | Rewrite Scribe VAD query parameters for VAD commits |
 | `SCRIBE_VAD_SILENCE_THRESHOLD_SECS` | `1` | Silence before a VAD commit, `0.192`–`3.0` |
 | `SCRIBE_VAD_THRESHOLD` | `0.4` | Scribe speech-detection threshold, `0.1`–`0.9` |
@@ -190,9 +200,9 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SONIOX_MODEL` | `stt-async-v6` | Batch model |
 | `SONIOX_REALTIME_MODEL` | `stt-rt-v6` | Realtime model |
 | `SONIOX_ENDPOINT_DETECTION` | `true` | Soniox semantic endpointing; disabled automatically for diarization |
-| `SONIOX_ENDPOINT_SENSITIVITY` | `0` | Endpoint likelihood, `-1.0` to `1.0` |
+| `SONIOX_ENDPOINT_SENSITIVITY` | `-1` | Endpoint likelihood, `-1.0` to `1.0`; lower waits for more context |
 | `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL` | `0` | Endpoint latency profile, `0`–`3` |
-| `SONIOX_MAX_ENDPOINT_DELAY_MS` | `2000` | Hard upper bound after speech ends, `500`–`3000` |
+| `SONIOX_MAX_ENDPOINT_DELAY_MS` | `3000` | Hard upper bound after speech ends, `500`–`3000` |
 | `SONIOX_KEEPALIVE_MS` | `10000` | Send Soniox keepalive after this much audio silence; `0` disables |
 | `SONIOX_PREFIX_BATCH_CONNECT_MS` | `1200` | If Soniox connects slower, send queued audio through batch instead of a burst (`0` disables) |
 | `SONIOX_RECONNECT_LAG_MS` | `4000` | Reconnect when Soniox is this far behind live audio |
@@ -203,9 +213,13 @@ Environment variables (all optional; defaults in `src/config.ts`):
 | `SONIOX_CLOSE_RECOVERY_MS` | `15000` | Max time to wait for full batch recovery before returning an error |
 | `SONIOX_LANGUAGE_HINTS` | `ru,en` | Fallback language hints |
 | `SONIOX_LANGUAGE_HINTS_STRICT` | `true` | Use `language_hints_strict` when there is one explicit hint |
-| `SONIOX_CONTEXT_FILE` | `~/.config/soniox-proxy/context.json` | Recognition prompt and term list |
+| `SONIOX_AUTO_LANGUAGE` | `hi` | Picker sentinel that switches Soniox to automatic language detection |
+| `SONIOX_CONTEXT_FILE` | `~/.config/soniox-proxy/context.json` | Free-text recognition prompt |
 | `SONIOX_CONTEXT_TEXT` | empty | Extra context text from the environment |
-| `SONIOX_CONTEXT_TERMS` | empty | Comma-separated extra terms |
+| `SONIOX_API_BASE_URL` | `https://api.soniox.com` | Soniox REST base used by the warm fetch adapter |
+| `SONIOX_REALTIME_HOST` | `stt-rt.soniox.com` | Soniox realtime host kept warm |
+| `WARMUP_ENABLED` | `true` | Keep one warm connection per provider |
+| `WARMUP_INTERVAL_MS` | `30000` | Warm connection probe interval |
 | `SONIOX_MAX_CONCURRENCY` | `2` | Batch concurrency |
 | `DRY_RUN` | `false` | Capture/pass-through instead of interception |
 | `CAPTURE_TEMPLATE` | `false` | Write a sanitized response template |
@@ -233,7 +247,7 @@ Soniox returns subword pieces and periodically drops the prefix that it has alre
 4. sends one final `Results` segment when the app sends `CloseStream`,
 5. ends with a `Metadata` message and closes the socket after a short delay (`WS_CLOSE_DELAY_MS`, default 350 ms) so the app can render the final text.
 
-Endpoint detection is enabled by default with Soniox's conservative settings (`endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`, `max_endpoint_delay_ms=2000`). Soniox finalizes pending tokens at natural pauses, which shortens the CloseStream tail; it is disabled automatically when `diarize=true`, because Soniox documents that endpointing reduces diarization accuracy. `SONIOX_ENDPOINT_DETECTION=false` restores the old single-segment behavior. For lower latency at a small accuracy risk, use Soniox's recommended starting point: `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL=2`, `SONIOX_ENDPOINT_SENSITIVITY=0.3`, and optionally `SONIOX_MAX_ENDPOINT_DELAY_MS=1500`.
+Endpoint detection is enabled by default with Soniox's quality-first settings (`endpoint_sensitivity=-1`, `endpoint_latency_adjustment_level=0`, `max_endpoint_delay_ms=3000`). Soniox finalizes pending tokens at natural pauses, which shortens the CloseStream tail; it is disabled automatically when `diarize=true`, because Soniox documents that endpointing reduces diarization accuracy. `SONIOX_ENDPOINT_DETECTION=false` restores the old single-segment behavior. For lower latency at a small accuracy risk, use Soniox's recommended starting point: `SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL=2`, `SONIOX_ENDPOINT_SENSITIVITY=0.3`, and optionally `SONIOX_MAX_ENDPOINT_DELAY_MS=1500`.
 
 If no binary audio frame arrives for `SONIOX_KEEPALIVE_MS` (default 10 s), the bridge sends Soniox's `{"type":"keepalive"}` control. Soniox ends an audio-idle stream after 20 s; this preserves context through a long pause. Soniox bills the full stream duration, so a kept-open stream still accrues cost; set `SONIOX_KEEPALIVE_MS=0` to disable this behavior.
 
@@ -257,28 +271,44 @@ Soniox's public pay-as-you-go rates are about `$0.12/hour` realtime and `$0.10/h
 ### Quality profile
 
 `bash scripts/start-fast.sh` applies the quality profile.
-Scribe uses `vad_silence_threshold_secs=1`, `vad_threshold=0.4`, and
+Scribe uses `no_verbatim=false`, `vad_silence_threshold_secs=1`, `vad_threshold=0.4`, and
 minimum speech/silence durations of `100 ms`. SuperWhisper closes its Scribe
 socket about `1.5 s` after the user stops, so the provider default of `1.5 s`
 leaves no room for the final commit. One second keeps that margin without the
 `0.5 s` fragmentation that glued words together.
-The context terms are appended as Scribe `keyterms`, which improves names and
-product terms. ElevenLabs bills keyterm prompting at an additional rate; set
-`SCRIBE_KEYTERMS=false` to disable it.
+The proxy strips every `keyterms`/`keyterms[]` parameter from realtime and
+file-mode Scribe, because keyterm prompting is billed separately.
 
-Soniox uses `endpoint_sensitivity=0`, `endpoint_latency_adjustment_level=0`,
-and `max_endpoint_delay_ms=2000`, the defaults from the
+Soniox uses `endpoint_sensitivity=-1`, `endpoint_latency_adjustment_level=0`,
+and `max_endpoint_delay_ms=3000`, more conservative than the defaults from the
 [Soniox endpoint documentation](https://docs.soniox.com/stt/rt/endpoint-detection).
-Those defaults favor recognition accuracy: the model waits longer before
-committing a segment and splits speech into fewer pieces.
+This profile favors recognition accuracy over latency: the model waits for
+more context before committing a segment and splits speech into fewer pieces.
+At `CloseStream` the bridge calls Soniox's graceful finish and waits for the
+final result, so the longer endpoint delay does not strand the tail.
 When the request has one explicit language hint (`ru`), the proxy also sends
 `language_hints_strict=true`, following Soniox's single-language guidance.
 Automatic and multi-language requests stay non-strict.
 
+The Nova picker has no automatic option. Select Hindi (`hi`) and the proxy
+omits language hints while enabling Soniox language identification. Set
+`SONIOX_AUTO_LANGUAGE` to use a different sentinel.
+
 The managed prompt in `~/.config/soniox-proxy/context.json` is sent as Soniox
-`context` and supplies the Scribe keyterms. Edit its `terms` and `text`, then
+`context`. Only its free-text `text` is used; `terms` and `general` are ignored
+because provider term lists were rewriting ordinary words. Edit `text`, then
 re-run `start-fast.sh`. The proxy does not read SuperWhisper's mode prompt, so a
 translation or writing prompt cannot leak into recognition.
+
+Batch and realtime share one recognition configuration: same language hints,
+strictness, language identification, diarization, and prompt. Only the model
+differs (`stt-async-v6` for files, `stt-rt-v6` for live audio).
+
+At startup, and every `WARMUP_INTERVAL_MS`, the proxy keeps one keep-alive
+connection to `api.soniox.com`, `api.elevenlabs.io`, and
+`api.superwhisper.com`. The Scribe WebSocket reuses the warm ElevenLabs socket,
+and Soniox REST calls go through the warm fetch adapter, so the first request
+after a restart does not pay for DNS or a TLS handshake.
 
 The same values are written to the owned LaunchAgent. A nohup-only setup applies
 until logout or reboot. The proxy never reads or modifies SuperWhisper.
@@ -293,15 +323,32 @@ When SuperWhisper opens the Scribe realtime path, it uses `wss://api.elevenlabs.
 
 For `commit_strategy=vad`, the installed profile sets `vad_silence_threshold_secs=1`, `vad_threshold=0.4`, `min_speech_duration_ms=100`, and `min_silence_duration_ms=100`. The silence value is below the provider default of `1.5 s` so the last sentence is committed before the app closes. Manual and turn-prediction VAD parameters are not rewritten. `SCRIBE_VAD_TUNING=false` leaves the app's VAD parameters unchanged.
 
-The proxy appends the context terms as repeated `keyterms` query parameters, preserving keyterms the app already sent. Realtime Scribe accepts at most 50 keyterms of 20 characters each, so longer terms are skipped. Keyterm prompting has an additional provider cost; `SCRIBE_KEYTERMS=false` disables only this addition.
+The proxy removes every `keyterms`/`keyterms[]` parameter from the Scribe
+socket, because keyterm prompting is billed separately.
 
 Every Scribe socket logs `audio_frames`, `audio_bytes`, and `silence_before_close_ms`. If `silence_before_close_ms` is close to `1500`, the app is waiting for a final commit that has not arrived yet; a smaller `vad_silence_threshold_secs` moves the commit earlier.
 
-For every Scribe realtime session, the proxy sets `no_verbatim=false` so Scribe is not instructed to remove filler words. It preserves the selected language and other query parameters. SuperWhisper's separate language-model processing can still edit the text.
+The proxy sets `no_verbatim=false` on every Scribe socket so filler words,
+false starts, and repetitions are kept. It preserves the selected language and
+every other query parameter. Set `SCRIBE_VERBATIM=false` to ask Scribe for
+cleanup instead. SuperWhisper's separate language-model processing can still
+edit the text.
+
+## Scribe file mode
+
+SuperWhisper's non-realtime Scribe path is
+`POST https://api.superwhisper.com/elevenlabs/v1/transcribe`, a multipart upload
+with `language_code`, `no_verbatim`, `keyterms[]`, `diarize`, and an `audio`
+part. The proxy MITMs `api.superwhisper.com`, removes `keyterms[]` and
+sets `no_verbatim=false`. It keeps the language, diarization, and audio, then
+forwards the upload. Without an explicit `no_verbatim`, Scribe falls back to
+cleanup and deletes fillers and repeated words. SuperWhisper's own backend
+still talks to ElevenLabs, so the proxy never needs an ElevenLabs key.
+Non-transcribe traffic on that host is streamed through.
 
 The proxy deliberately does not batch, buffer, or suppress Scribe messages. The app closes about 2.5 s after the last audio frame (measured 2026-11-09), before a batch final could arrive; a batch result also cannot reach a closed client. Suppressing upstream finals therefore lost text. Forwarding the upstream `committed_transcript` is the reliable path. The only queue is the short upstream WebSocket handshake; frames are forwarded immediately after it opens. The app's own Scribe final is the transcript; the proxy adds no synthetic final.
 
-For the Scribe host, other ElevenLabs HTTP requests and responses are streamed through instead of buffered or size-limited.
+For the Scribe and SuperWhisper hosts, other HTTP requests and responses are streamed through instead of buffered or size-limited.
 
 A 42 s Russian smoke test delivered the final sentence before the app closed. The microphone also transcribed a nearby voice message, so final checks must run in a quiet room. Live text is never written to logs.
 

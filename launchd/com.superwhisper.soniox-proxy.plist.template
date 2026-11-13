@@ -23,12 +23,16 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>SONIOX_ENDPOINT_DETECTION</key>
     <string>true</string>
+    <key>SONIOX_AUTO_LANGUAGE</key>
+    <string>hi</string>
     <key>SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL</key>
     <string>0</string>
     <key>SONIOX_ENDPOINT_SENSITIVITY</key>
-    <string>0</string>
+    <string>-1</string>
     <key>SONIOX_MAX_ENDPOINT_DELAY_MS</key>
-    <string>2000</string>
+    <string>3000</string>
+    <key>SCRIBE_VERBATIM</key>
+    <string>true</string>
     <key>SCRIBE_VAD_SILENCE_THRESHOLD_SECS</key>
     <string>1</string>
   </dict>

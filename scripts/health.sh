@@ -83,7 +83,7 @@ fi
 printf 'recognition context\n'
 require_cmd jq
 if [ -f "$SONIOX_CONTEXT_FILE" ] && jq -e 'type == "object"' "$SONIOX_CONTEXT_FILE" >/dev/null 2>&1; then
-  context_summary="$(jq -r '"\((.terms // [] | length)) terms, \((.text // "" | length)) text chars"' "$SONIOX_CONTEXT_FILE")"
+  context_summary="$(jq -r '"\((.text // "" | length)) text chars"' "$SONIOX_CONTEXT_FILE")"
   ok "context prompt: $context_summary"
 else
   warn "context prompt is missing or invalid: $SONIOX_CONTEXT_FILE (run scripts/configure-soniox-context.sh)"

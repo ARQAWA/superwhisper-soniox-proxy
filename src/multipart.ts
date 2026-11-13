@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 import { Busboy } from "@fastify/busboy";
 import type { ParsedFile, ParsedMultipart } from "./types.js";
@@ -103,4 +104,98 @@ export async function parseMultipart(
     files,
     audio: preferred,
   };
+}
+
+export interface MultipartPart {
+  name: string;
+  value?: string;
+  filename?: string;
+  mimeType?: string;
+  data?: Buffer;
+}
+
+function headerSafe(value: string): string {
+  return value.replace(/[\r\n"]/g, "_");
+}
+
+export function buildMultipart(
+  parts: MultipartPart[],
+  boundary = `----swproxy-${randomUUID()}`,
+): { body: Buffer; contentType: string } {
+  const chunks: Buffer[] = [];
+  for (const part of parts) {
+    const name = headerSafe(part.name);
+    if (part.data) {
+      const filename = headerSafe(part.filename ?? "audio.bin");
+      const mimeType = headerSafe(part.mimeType || "application/octet-stream");
+      chunks.push(
+        Buffer.from(
+          `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="${name}"; filename="${filename}"\r\n` +
+            `Content-Type: ${mimeType}\r\n\r\n`,
+        ),
+        part.data,
+        Buffer.from("\r\n"),
+      );
+    } else {
+      chunks.push(
+        Buffer.from(
+          `--${boundary}\r\n` +
+            `Content-Disposition: form-data; name="${name}"\r\n\r\n` +
+            `${part.value ?? ""}\r\n`,
+        ),
+      );
+    }
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  return {
+    body: Buffer.concat(chunks),
+    contentType: `multipart/form-data; boundary=${boundary}`,
+  };
+}
+
+const DROPPED_SCRIBE_FIELDS: Record<string, true> = {
+  keyterms: true,
+  "keyterms[]": true,
+};
+
+export interface ScribeBatchRewrite {
+  body: Buffer;
+  contentType: string;
+  droppedFields: string[];
+  noVerbatim: "true" | "false";
+}
+
+/**
+ * SuperWhisper's file-mode Scribe upload carries a keyterm list and a
+ * no_verbatim flag. Keyterm prompting is billed separately, so it is always
+ * removed. The no_verbatim flag is written explicitly: when it is absent,
+ * Scribe falls back to cleanup that deletes fillers and repeated words.
+ */
+export function rewriteScribeBatch(
+  parsed: ParsedMultipart,
+  options: { verbatim: boolean },
+): ScribeBatchRewrite {
+  const parts: MultipartPart[] = [];
+  const droppedFields: string[] = [];
+  for (const name of parsed.fieldNames) {
+    const lower = name.toLowerCase();
+    if (DROPPED_SCRIBE_FIELDS[lower]) {
+      droppedFields.push(name);
+      continue;
+    }
+    if (lower === "no_verbatim") continue;
+    parts.push({ name, value: parsed.fields[name] });
+  }
+  const noVerbatim = options.verbatim ? "false" : "true";
+  parts.push({ name: "no_verbatim", value: noVerbatim });
+  for (const file of parsed.files) {
+    parts.push({
+      name: file.field,
+      filename: file.filename,
+      mimeType: file.mimeType,
+      data: file.data,
+    });
+  }
+  return { ...buildMultipart(parts), droppedFields, noVerbatim };
 }

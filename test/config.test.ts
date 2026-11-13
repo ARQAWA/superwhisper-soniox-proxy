@@ -9,14 +9,22 @@ describe("Soniox realtime tuning", () => {
   it("uses Soniox's conservative endpoint defaults", () => {
     const loaded = config();
     expect(loaded.SONIOX_ENDPOINT_DETECTION).toBe(true);
-    expect(loaded.SONIOX_ENDPOINT_SENSITIVITY).toBe(0);
+    expect(loaded.SONIOX_ENDPOINT_SENSITIVITY).toBe(-1);
     expect(loaded.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL).toBe(0);
-    expect(loaded.SONIOX_MAX_ENDPOINT_DELAY_MS).toBe(2000);
+    expect(loaded.SONIOX_MAX_ENDPOINT_DELAY_MS).toBe(3000);
     expect(loaded.SONIOX_KEEPALIVE_MS).toBe(10000);
     expect(loaded.SONIOX_LANGUAGE_HINTS_STRICT).toBe(true);
+    expect(loaded.SONIOX_AUTO_LANGUAGE).toBe("hi");
     expect(loaded.SONIOX_CONTEXT_FILE).toContain(".config/soniox-proxy/context.json");
-    expect(loaded.SCRIBE_KEYTERMS).toBe(true);
+    expect(loaded.SONIOX_API_BASE_URL).toBe("https://api.soniox.com");
+    expect(loaded.SONIOX_REALTIME_HOST).toBe("stt-rt.soniox.com");
+    expect(loaded.SUPERWHISPER_HOST).toBe("api.superwhisper.com");
+    expect(loaded.SCRIBE_BATCH_ENABLED).toBe(true);
+    expect(loaded.SCRIBE_BATCH_PATH).toBe("/elevenlabs/v1/transcribe");
+    expect(loaded.WARMUP_ENABLED).toBe(true);
+    expect(loaded.WARMUP_INTERVAL_MS).toBe(30000);
     expect(loaded.SCRIBE_VAD_TUNING).toBe(true);
+    expect(loaded.SCRIBE_VERBATIM).toBe(true);
     expect(loaded.SCRIBE_VAD_SILENCE_THRESHOLD_SECS).toBe(1);
     expect(loaded.SCRIBE_VAD_THRESHOLD).toBe(0.4);
     expect(loaded.SCRIBE_MIN_SPEECH_DURATION_MS).toBe(100);
@@ -42,5 +50,18 @@ describe("Soniox realtime tuning", () => {
     expect(loaded.SONIOX_ENDPOINT_LATENCY_ADJUSTMENT_LEVEL).toBe(2);
     expect(loaded.SONIOX_MAX_ENDPOINT_DELAY_MS).toBe(1500);
     expect(loaded.SONIOX_KEEPALIVE_MS).toBe(5000);
+  });
+
+  it("accepts a warmup interval override", () => {
+    const loaded = config({ WARMUP_INTERVAL_MS: "10000" });
+    expect(loaded.WARMUP_INTERVAL_MS).toBe(10000);
+  });
+
+  it("can request Scribe cleanup explicitly", () => {
+    expect(config({ SCRIBE_VERBATIM: "false" }).SCRIBE_VERBATIM).toBe(false);
+  });
+
+  it("can use another automatic-language sentinel", () => {
+    expect(config({ SONIOX_AUTO_LANGUAGE: "xx" }).SONIOX_AUTO_LANGUAGE).toBe("xx");
   });
 });
